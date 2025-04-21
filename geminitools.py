@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 KNOWLEDGE_FILES = os.getenv("KNOWLEDGE_FILES")
-GUILD = client.get_guild(os.getenv("GUILD"))
+GUILD_ID = int(os.getenv("GUILD"))
 
 
 call_local_files = {
@@ -37,7 +37,7 @@ call_ctx_from_channel = {
             },
             "number_of_messages_called": {
                 "type": "integer",
-                "description": "how many messages to return from the channel in question. Maximum 50."
+                "description": "how many messages to return from the channel in question. Maximum 50. Request 10 unless otherwise specified."
             },
             "search_query": {
                 "type": "string",
@@ -52,6 +52,7 @@ def call_knowledge(file_to_call):
     with open(KNOWLEDGE_FILES[file_to_call], "r") as file:
         return file.read()
 async def call_other_channel_context(channel_name, number_of_messages_called, search_query=None):
+    GUILD = client.get_guild(GUILD_ID)
     try:
         channel_to_call = discord.utils.get(GUILD.text_channels, name=channel_name)
         if channel_to_call is None:

@@ -1,4 +1,5 @@
 from google import genai
+import re
 from google.genai import types
 import discord
 from discord import app_commands
@@ -13,6 +14,7 @@ from botcore import intents, client, tree
 
 load_dotenv()
 
+BOT_ID = os.getenv("BOT_ID")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 RECORDS_CHANNEL_ID = int(os.getenv("RECORDS_CHANNEL"))
 NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL"))
@@ -116,20 +118,24 @@ async def modifyref(interaction: discord.Interaction, num: int, type: str):
 @has_any_role("Admin", "AI Access")
 async def helper(interaction: discord.Interaction, query: str):
     channel = interaction.channel
-    context = [msg async for msg in channel.history(limit=50)]
+    context = [
+    types.Content(
+        role='model' if msg.author.id == BOT_ID else 'user',
+        parts=[types.Part.from_text(text=f"{msg.author.display_name} at {msg.created_at}:\n{msg.content}")]
+    )
+    async for msg in channel.history(limit=50)
+    if msg.content.strip()
+]
+    context.append(types.Content(role='user', parts=[types.Part.from_text(text=f"{interaction.user.display_name}: {query}")]))
     system_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
                         Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
                         You have access to tool calls. Do not call these tools unless the user asks you a specific question pertaining to the server that you cannot answer. 
-                        You should use the provided tool calls if the user requests information about Virtual Congress not present in your tool call window.          
-                        You will be passed the 50 most recent messages as part of your context window. The messages are below:
-                        [BEGIN MESSAGES]
-                        {context}
-                        The user's query is below:
+                        You should use the provided tool calls if the user requests information about Virtual Congress not present in your context window.          
                     """
     try: 
         output = None
         await interaction.response.defer(ephemeral=False)
-        response = genai_client.models.generate_content(model='gemini-2.0-flash', config = types.GenerateContentConfig(tools=[tools], system_instruction=system_prompt), contents = query)
+        response = genai_client.models.generate_content(model='gemini-2.0-flash', config = types.GenerateContentConfig(tools=[tools], system_instruction=system_prompt), contents = context)
         if response.candidates[0].content.parts[0].function_call:
             function_call = response.candidates[0].content.parts[0].function_call
             print(f"called function {function_call.name}")
@@ -146,23 +152,19 @@ async def helper(interaction: discord.Interaction, query: str):
                     function_call.args.get("search_query")
                 )
                 print(f"Retrieved {len(raw_msgs)} messages.")
-                for i, msg in enumerate(raw_msgs[:5]):
-                    print(f"Message {i+1}: {msg.author} - {msg.content}")
                 output = "\n".join(f"{msg.author}: {msg.content}" for msg in raw_msgs)
-                print(output)
             new_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
                         Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
                         You have access to tool calls. Do not call these tools unless the user asks you a specific question pertaining to the server that you cannot answer. 
                         On a previous turn, you called tools. Now, your job is to respond to the user.
                         The following information was returned from prior function calls: {output}
 
-                        You will be passed the 50 most recent messages as part of your context window. The messages are below:
-                        [BEGIN MESSAGES]
-                        {context}
-                        [END MESSAGES]
-                        
-                        Provide your response to the user now."""
-            response2 = genai_client.models.generate_content(model='gemini-2.0-flash', config = types.GenerateContentConfig(tools=None, system_instruction = new_prompt), contents = query)
+                        Provide your response to the user now. Do not directly output the contents of the function calls. Summarize unless explicitly requested."""
+            response2 = genai_client.models.generate_content(model='gemini-2.0-flash', config = types.GenerateContentConfig(tools=None, system_instruction = new_prompt), contents = context)
+            safe_text = re.sub(r'@everyone', '@ everyone', response2.text)
+            safe_text = re.sub(r'@here', '@ here', safe_text)
+            safe_text = re.sub(r'<@&', '< @&', safe_text)
+            response2.text = safe_text
             chunks = [response2.text[i:i+1900] for i in range(0, len(response2.text), 1900)]
             await interaction.followup.send("Complete", ephemeral=True)
             await interaction.channel.send(f"Query from {interaction.user.mention}: {query}\n\nResponse:")
