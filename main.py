@@ -14,11 +14,15 @@ from botcore import intents, client, tree
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-RECORDS_CHANNEL = client.get_channel(os.getenv("RECORDS_CHANNEL"))
-NEWS_CHANNEL = client.get_channel(os.getenv("NEWSCHANNEL"))
-SIGN_CHANNEL = client.get_channel(os.getenv("SIGN_CHANNEL"))
-CLERK_CHANNEL = client.get_channel(os.getenv("CLERK_CHANNEL"))
-
+RECORDS_CHANNEL_ID = int(os.getenv("RECORDS_CHANNEL"))
+NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL"))
+SIGN_CHANNEL_ID = int(os.getenv("SIGN_CHANNEL"))
+CLERK_CHANNEL_ID = int(os.getenv("CLERK_CHANNEL"))
+KNOWLEDGE_FILES = {
+    "rules": os.getenv("KNOWLEDGE_FILES_RULES"),
+    "constitution": os.getenv("KNOWLEDGE_FILES_CONSTITUTION"),
+    "server information": os.getenv("KNOWLEDGE_FILES_SERVER_INFO"),
+}
 
 
 genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -185,6 +189,15 @@ async def helper(interaction: discord.Interaction, query: str):
 async def on_ready():
     await tree.sync()
     print(f"Logged in as {client.user}")
+    global RECORDS_CHANNEL, NEWS_CHANNEL, SIGN_CHANNEL, CLERK_CHANNEL
+    RECORDS_CHANNEL = client.get_channel(RECORDS_CHANNEL_ID)
+    NEWS_CHANNEL = client.get_channel(NEWS_CHANNEL_ID)
+    SIGN_CHANNEL = client.get_channel(SIGN_CHANNEL_ID)
+    CLERK_CHANNEL = client.get_channel(CLERK_CHANNEL_ID)
+    print(f"Clerk Channel: {CLERK_CHANNEL.name if CLERK_CHANNEL else 'Not Found'}")
+    print(f"News Channel: {NEWS_CHANNEL.name if NEWS_CHANNEL else 'Not Found'}")
+    print(f"Sign Channel: {SIGN_CHANNEL.name if SIGN_CHANNEL else 'Not Found'}")
+    print(f"Records Channel: {RECORDS_CHANNEL.name if RECORDS_CHANNEL else 'Not Found'}")
 
 @client.event
 async def on_message(message):
