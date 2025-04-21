@@ -203,13 +203,13 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
-    if message.channel == CLERK_CHANNEL and not message.author.bot:
+    if message.channel == client.get_channel(CLERK_CHANNEL_ID) and not message.author.bot:
         await update_bill_reference(message)
-    if message.channel == NEWS_CHANNEL:
+    if message.channel == client.get_channel(NEWS_CHANNEL_ID):
         with open(NEWS_FILE, "a") as file:
             file.write(message.content)
-    if message.channel == SIGN_CHANNEL and "docs.google.com" in message.content:
+    if message.channel == client.get_channel(SIGN_CHANNEL_ID) and "docs.google.com" in message.content:
         link = message.jump_url
         await RECORDS_CHANNEL.send(f'<@&1269061253964238919>, a new bill has been signed! {link}')
-
+        
 client.run(DISCORD_TOKEN)
