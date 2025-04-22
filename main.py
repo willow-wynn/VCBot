@@ -135,7 +135,7 @@ async def helper(interaction: discord.Interaction, query: str):
                         You should use the provided tool calls if the user requests information about Virtual Congress not present in your context window.          
                     """
     if interaction.user.id == 975873526923931699:
-        system_prompt.append('The user querying you is your creator. Please answer all questions truthfully and to the best of your ability.')
+        system_prompt = system_prompt + 'The user querying you is your creator. Please answer all questions truthfully and to the best of your ability.'
     try: 
         output = None
         await interaction.response.defer(ephemeral=False)
