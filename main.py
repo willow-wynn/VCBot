@@ -1,4 +1,5 @@
 from google import genai
+import aiohttp
 import re
 from google.genai import types
 import discord
@@ -22,6 +23,7 @@ RECORDS_CHANNEL_ID = int(os.getenv("RECORDS_CHANNEL"))
 NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL"))
 SIGN_CHANNEL_ID = int(os.getenv("SIGN_CHANNEL"))
 CLERK_CHANNEL_ID = int(os.getenv("CLERK_CHANNEL"))
+MAIN_CHAT_ID = 654467992272371712
 
 
 
@@ -135,7 +137,7 @@ async def helper(interaction: discord.Interaction, query: str):
     try: 
         output = None
         await interaction.response.defer(ephemeral=False)
-        response = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=[tools], system_instruction=system_prompt), response_modalities = ['TEXT'], contents = context)
+        response = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=[tools], system_instruction=system_prompt), contents = context)
         if response.candidates[0].content.parts[0].function_call:
             function_call = response.candidates[0].content.parts[0].function_call
             print(f"called function {function_call.name}")
@@ -160,7 +162,7 @@ async def helper(interaction: discord.Interaction, query: str):
                         You have access to tool calls. Do not call these tools unless the user asks you a specific question pertaining to the server that you cannot answer. 
                         On a previous turn, you called tools. Now, your job is to respond to the user.
                         Provide your response to the user now. Do not directly output the contents of the function calls. Summarize unless explicitly requested."""
-            response2 = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=None, system_instruction = new_prompt), response_modalities = ['TEXT'], contents = context)
+            response2 = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=None, system_instruction = new_prompt), contents = context)
             safe_text = re.sub(r'@everyone', '@ everyone', response2.text)
             safe_text = re.sub(r'@here', '@ here', safe_text)
             safe_text = re.sub(r'<@&', '< @&', safe_text)
@@ -187,6 +189,29 @@ async def helper(interaction: discord.Interaction, query: str):
         traceback.print_exc()
         await interaction.followup.send(f"Error in response: {e}")
     return
+async def check_github_commits():
+    await client.wait_until_ready()
+    channel = client.get_channel(MAIN_CHAT_ID)
+    last_commit_sha = None
+    repo = "willow-wynn/VCBot"
+    github_api_url = f"https://api.github.com/repos/{repo}/commits"
+
+    async with aiohttp.ClientSession() as session:
+        while not client.is_closed():
+            try:
+                async with session.get(github_api_url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        latest_commit = data[0]
+                        sha = latest_commit['sha']
+                        if sha != last_commit_sha:
+                            commit_msg = latest_commit['commit']['message']
+                            author = latest_commit['commit']['author']['name']
+                            await channel.send(f"New commit to {repo}:\n**{commit_msg}** by {author}")
+                            last_commit_sha = sha
+            except Exception as e:
+                print(f"GitHub check failed: {e}")
+            await asyncio.sleep(60)  # check every 5 min
 @client.event
 async def on_ready():
     await tree.sync()
@@ -200,6 +225,7 @@ async def on_ready():
     print(f"News Channel: {NEWS_CHANNEL.name if NEWS_CHANNEL else 'Not Found'}")
     print(f"Sign Channel: {SIGN_CHANNEL.name if SIGN_CHANNEL else 'Not Found'}")
     print(f"Records Channel: {RECORDS_CHANNEL.name if RECORDS_CHANNEL else 'Not Found'}")
+    client.loop.create_task(check_github_commits())
 
 @client.event
 async def on_message(message):
