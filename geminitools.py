@@ -1,7 +1,8 @@
 import os
 import discord
 import asyncio
-from botcore import intents, client, tree, KNOWLEDGE_FILES
+from botcore import intents, client, tree
+from config import KNOWLEDGE_FILES
 from dotenv import load_dotenv
 
 load_dotenv()

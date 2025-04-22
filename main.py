@@ -10,7 +10,8 @@ import json
 from typing import Literal
 import geminitools
 import csv
-from botcore import intents, client, tree, KNOWLEDGE_FILES
+from botcore import intents, client, tree
+from config import KNOWLEDGE_FILES
 import traceback
 
 load_dotenv()
@@ -173,7 +174,7 @@ async def helper(interaction: discord.Interaction, query: str):
                 writer.writerow([f'query: {query}', f'response: {safe_text}'])
         else: 
             chunks = [response.text[i:i+1900] for i in range(0, len(response.text), 1900)]
-            await interaction.followup.send(f"Complete. Statistics: {response.usage_metadata}", ephemeral=True)
+            await interaction.followup.send(f"Complete. Input tokens: {response.usage_metadata.prompt_token_count}, Output tokens: {response.usage_metadata.candidates_token_count}", ephemeral=True)
             await interaction.channel.send(f"Query from {interaction.user.mention}: {query}\n\nResponse:")
             for chunk in chunks:
                 await interaction.channel.send(chunk)
