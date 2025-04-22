@@ -14,6 +14,7 @@ import csv
 from botcore import intents, client, tree
 from config import KNOWLEDGE_FILES
 import traceback
+from functools import wraps
 
 load_dotenv()
 
@@ -40,6 +41,7 @@ def has_any_role(*role_names):
     return app_commands.check(predicate)
 def limit_to_channels(channel_ids: list, exempt_roles = None):
     def decorator(func):
+        @wraps(func)
         async def wrapper(interaction: discord.Interaction, *args, **kwargs):
             if interaction.channel.id not in channel_ids:
                 await interaction.response.send_message("This command can only be used in specific channels.", ephemeral=True)
