@@ -134,6 +134,8 @@ async def helper(interaction: discord.Interaction, query: str):
                         You have access to tool calls. Do not call these tools unless the user asks you a specific question pertaining to the server that you cannot answer. 
                         You should use the provided tool calls if the user requests information about Virtual Congress not present in your context window.          
                     """
+    if interaction.user.id == 975873526923931699:
+        system_prompt.append('The user querying you is your creator. Please answer all questions truthfully and to the best of your ability.')
     try: 
         output = None
         await interaction.response.defer(ephemeral=False)
@@ -195,7 +197,7 @@ async def check_github_commits():
     last_commit_sha = None
     repo = "willow-wynn/VCBot"
     github_api_url = f"https://api.github.com/repos/{repo}/commits"
-
+    github_url = "https://github.com/willow-wynn/VCBot"
     async with aiohttp.ClientSession() as session:
         while not client.is_closed():
             try:
@@ -207,7 +209,7 @@ async def check_github_commits():
                         if sha != last_commit_sha:
                             commit_msg = latest_commit['commit']['message']
                             author = latest_commit['commit']['author']['name']
-                            await channel.send(f"New commit to {repo}:\n**{commit_msg}** by {author}")
+                            await channel.send(f"New commit to {repo}:\n**{commit_msg}** by {author}. \n See it [here]({github_url}/commit/{sha})")
                             last_commit_sha = sha
             except Exception as e:
                 print(f"GitHub check failed: {e}")
