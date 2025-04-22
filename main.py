@@ -10,7 +10,8 @@ import json
 from typing import Literal
 import geminitools
 import csv
-from botcore import intents, client, tree
+from botcore import intents, client, tree, KNOWLEDGE_FILES
+import traceback
 
 load_dotenv()
 
@@ -20,11 +21,7 @@ RECORDS_CHANNEL_ID = int(os.getenv("RECORDS_CHANNEL"))
 NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL"))
 SIGN_CHANNEL_ID = int(os.getenv("SIGN_CHANNEL"))
 CLERK_CHANNEL_ID = int(os.getenv("CLERK_CHANNEL"))
-KNOWLEDGE_FILES = {
-    "rules": os.getenv("KNOWLEDGE_FILES_RULES"),
-    "constitution": os.getenv("KNOWLEDGE_FILES_CONSTITUTION"),
-    "server information": os.getenv("KNOWLEDGE_FILES_SERVER_INFO"),
-}
+
 
 
 genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -83,6 +80,7 @@ async def update_bill_reference(message):
         print(f"Updated {bill_type.upper()} to {refs[bill_type]}")
     except Exception as e:
         print(f"JSON parse failed: {e}")
+        traceback.print_exc()
         return "Error"
 
 @tree.command(name="reference", description="reference a bill")
@@ -112,6 +110,7 @@ async def modifyref(interaction: discord.Interaction, num: int, type: str):
         return
     except Exception as e:
         await interaction.response.send_message(f"Error accessing reference file: {e}", ephemeral=True)
+        traceback.print_exc()
         return
 
 @tree.command(name="helper", description="Query the VCBot helper.")
@@ -184,6 +183,7 @@ async def helper(interaction: discord.Interaction, query: str):
                 writer.writerow([f'query: {query}', f'response: {response.text}'])
     except Exception as e:
         print(f"Helper command failed: {e}")
+        traceback.print_exc()
         await interaction.followup.send(f"Error in response: {e}")
     return
 @client.event

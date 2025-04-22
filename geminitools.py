@@ -1,11 +1,10 @@
 import os
 import discord
 import asyncio
-from botcore import intents, client, tree
+from botcore import intents, client, tree, KNOWLEDGE_FILES
 from dotenv import load_dotenv
 
 load_dotenv()
-KNOWLEDGE_FILES = os.getenv("KNOWLEDGE_FILES")
 GUILD_ID = int(os.getenv("GUILD"))
 
 
@@ -17,7 +16,7 @@ call_local_files = {
         "properties": {
             "file_to_call": {
                 "type": "string",
-                "enum": ["Rules", "Constitution", "Server Information"],
+                "enum": ["rules", "constitution", "server_information", "house_rules", "senate_rules"],
                 "description": "which knowledge files to call",
             },
         },
