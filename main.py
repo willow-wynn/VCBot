@@ -120,14 +120,17 @@ async def modifyref(interaction: discord.Interaction, num: int, type: str):
 @has_any_role("Admin", "AI Access")
 async def helper(interaction: discord.Interaction, query: str):
     channel = interaction.channel
+    history = [msg async for msg in channel.history(limit=50) if msg.content.strip()]
     context = [
     types.Content(
-        role='model' if msg.author.id == BOT_ID else 'user',
+        role='assistant' if msg.author.id == BOT_ID else 'user',
+        # maybe simplify the text part? model gets role implicitly.
+        # parts=[types.Part.from_text(text=msg.content)]
+        # or keep metadata if you prefer:
         parts=[types.Part.from_text(text=f"{msg.author.display_name} at {msg.created_at}:\n{msg.content}")]
     )
-    async for msg in channel.history(limit=50)
-    if msg.content.strip()
-]
+        for msg in reversed(history) # <--- reverse here
+    ]
     context.append(types.Content(role='user', parts=[types.Part.from_text(text=f"{interaction.user.display_name}: {query}")]))
     system_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
                         Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
