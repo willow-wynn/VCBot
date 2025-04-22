@@ -79,7 +79,7 @@ llm = Ollama( # modify to openai/gemini model unless you have a NASA computer
 
 
 data = generate_qa_embedding_pairs(nodes=nodes, llm=llm, save_every=10, retry_limit=5, num_questions_per_chunk = 3, verbose=True, output_path="qa_dataset_new.json") 
-# The above function is extremely computationally intensive if you use a local model. ~1MTok input, ~2MTok output. Costs between $1 and $30 depending on API used if you use API.
+# The above function is extremely computationally intensive if you use a local model. ~1MTok input, ~2MTok output. Costs between $1 and $30 depending on API used (gemini flash vs Claude Sonnet) if you use API.
 # Recommend M3/4 Max/Ultra with at least 48GB of unified memory or 2x RTX 3090 or better. Otherwise, use cloud model or rent H100
 # I had to monkey patch llama-index so that Gemma3 wouldn't generate boilerplate that gets passed into the pairs
 # Either use the built-in qa_generate_prompt_template argument or monkey patch the function in your library
