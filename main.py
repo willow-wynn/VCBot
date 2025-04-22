@@ -164,7 +164,7 @@ async def helper(interaction: discord.Interaction, query: str):
             safe_text = re.sub(r'@here', '@ here', safe_text)
             safe_text = re.sub(r'<@&', '< @&', safe_text)
             safe_text_chunks = [safe_text[i:i+1900] for i in range(0, len(safe_text), 1900)]
-            await interaction.followup.send("Complete", ephemeral=True)
+            await interaction.followup.send(f"Complete. Statistics: {response2.usage_metadata}", ephemeral=True)
             await interaction.channel.send(f"Query from {interaction.user.mention}: {query}\n\nResponse:")
             for chunk in safe_text_chunks:
                 await interaction.channel.send(chunk)
@@ -173,7 +173,7 @@ async def helper(interaction: discord.Interaction, query: str):
                 writer.writerow([f'query: {query}', f'response: {safe_text}'])
         else: 
             chunks = [response.text[i:i+1900] for i in range(0, len(response.text), 1900)]
-            await interaction.followup.send("Complete", ephemeral=True)
+            await interaction.followup.send(f"Complete. Statistics: {response.usage_metadata}", ephemeral=True)
             await interaction.channel.send(f"Query from {interaction.user.mention}: {query}\n\nResponse:")
             for chunk in chunks:
                 await interaction.channel.send(chunk)
