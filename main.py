@@ -86,7 +86,7 @@ async def update_bill_reference(message):
         return "Error"
 
 @tree.command(name="reference", description="reference a bill")
-@has_any_role("Admin", "Representative")
+@has_any_role("Admin", "Representative", "House Clerk", "Moderator")
 async def reference(interaction: discord.Interaction, link: str, type: Literal["hr", "hres", "hjres", "hconres"]):
     try:
         refs = load_refs()
