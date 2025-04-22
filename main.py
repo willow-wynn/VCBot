@@ -135,7 +135,7 @@ async def helper(interaction: discord.Interaction, query: str):
     try: 
         output = None
         await interaction.response.defer(ephemeral=False)
-        response = genai_client.models.generate_content(model='gemini-2.0-flash', config = types.GenerateContentConfig(tools=[tools], system_instruction=system_prompt), contents = context)
+        response = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=[tools], system_instruction=system_prompt), response_modalities = ['TEXT'], contents = context)
         if response.candidates[0].content.parts[0].function_call:
             function_call = response.candidates[0].content.parts[0].function_call
             print(f"called function {function_call.name}")
@@ -160,7 +160,7 @@ async def helper(interaction: discord.Interaction, query: str):
                         You have access to tool calls. Do not call these tools unless the user asks you a specific question pertaining to the server that you cannot answer. 
                         On a previous turn, you called tools. Now, your job is to respond to the user.
                         Provide your response to the user now. Do not directly output the contents of the function calls. Summarize unless explicitly requested."""
-            response2 = genai_client.models.generate_content(model='gemini-2.0-flash', config = types.GenerateContentConfig(tools=None, system_instruction = new_prompt), contents = context)
+            response2 = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=None, system_instruction = new_prompt), response_modalities = ['TEXT'], contents = context)
             safe_text = re.sub(r'@everyone', '@ everyone', response2.text)
             safe_text = re.sub(r'@here', '@ here', safe_text)
             safe_text = re.sub(r'<@&', '< @&', safe_text)
