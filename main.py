@@ -38,6 +38,20 @@ def has_any_role(*role_names):
     async def predicate(interaction: discord.Interaction):
         return any(role.name in role_names for role in interaction.user.roles)
     return app_commands.check(predicate)
+def limit_to_channels(channel_ids: list, exempt_roles = None):
+    def decorator(func):
+        async def wrapper(interaction: discord.Interaction, *args, **kwargs):
+            if interaction.channel.id not in channel_ids:
+                await interaction.response.send_message("This command can only be used in specific channels.", ephemeral=True)
+                return
+            if exempt_roles:
+                if any(role.name in exempt_roles for role in interaction.user.roles):
+                    return await func(interaction, *args, **kwargs)
+            return await func(interaction, *args, **kwargs)
+        return wrapper
+    return decorator
+
+    
 
 def load_refs():
     if os.path.exists(BILL_REF_FILE):
@@ -118,6 +132,7 @@ async def modifyref(interaction: discord.Interaction, num: int, type: str):
 
 @tree.command(name="helper", description="Query the VCBot helper.")
 @has_any_role("Admin", "AI Access")
+@limit_to_channels([747871183915057212, 1327483297202176080], exempt_roles = ["Admin"])
 async def helper(interaction: discord.Interaction, query: str):
     channel = interaction.channel
     history = [msg async for msg in channel.history(limit=50) if msg.content.strip()]
@@ -132,7 +147,8 @@ async def helper(interaction: discord.Interaction, query: str):
     system_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
                         Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
                         You have access to tool calls. Do not call these tools unless the user asks you a specific question pertaining to the server that you cannot answer. 
-                        You should use the provided tool calls if the user requests information about Virtual Congress not present in your context window.          
+                        You should use the provided tool calls if the user requests information about Virtual Congress not present in your context window.   
+                        You can engage in conversation with users. You should not refuse requests unless they are harmful. If they are not harmful, try to the best of your ability to answer them.       
                     """
     if interaction.user.id == 975873526923931699:
         system_prompt = system_prompt + 'The user querying you is your creator. Please answer all questions truthfully and to the best of your ability.'
