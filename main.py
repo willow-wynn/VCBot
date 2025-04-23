@@ -284,6 +284,9 @@ async def check_github_commits():
                             f.write(sha)
                         if sha != last_commit_sha:
                             commit_msg = latest_commit['commit']['message']
+                            commit_msg = re.sub(r'@everyone', '@ everyone', commit_msg)
+                            commit_msg = re.sub(r'@here', '@ here', commit_msg)
+                            commit_msg = re.sub(r'<@&', '< @&', commit_msg)
                             author = latest_commit['commit']['author']['name']
                             await channel.send(f"New commit to {repo}:\n**{commit_msg}** by {author}. \n See it [here]({github_url}/commit/{sha})")
                             last_commit_sha = sha
