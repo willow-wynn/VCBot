@@ -16,42 +16,55 @@ from config import KNOWLEDGE_FILES
 import traceback
 from functools import wraps
 
-load_dotenv()
+def traced_load_dotenv():
+    print("Loading environment variables from .env")
+    load_dotenv()
+    print("Loaded environment variables from .env")
+
+traced_load_dotenv()
 
 BOT_ID = int(os.getenv("BOT_ID"))
+print(f"Loaded BOT_ID: {BOT_ID}")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+print(f"Loaded DISCORD_TOKEN: {DISCORD_TOKEN}")
 RECORDS_CHANNEL_ID = int(os.getenv("RECORDS_CHANNEL"))
+print(f"Loaded RECORDS_CHANNEL_ID: {RECORDS_CHANNEL_ID}")
 NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL"))
+print(f"Loaded NEWS_CHANNEL_ID: {NEWS_CHANNEL_ID}")
 SIGN_CHANNEL_ID = int(os.getenv("SIGN_CHANNEL"))
+print(f"Loaded SIGN_CHANNEL_ID: {SIGN_CHANNEL_ID}")
 CLERK_CHANNEL_ID = int(os.getenv("CLERK_CHANNEL"))
+print(f"Loaded CLERK_CHANNEL_ID: {CLERK_CHANNEL_ID}")
 MAIN_CHAT_ID = 654467992272371712
-
-
+print(f"Loaded MAIN_CHAT_ID: {MAIN_CHAT_ID}")
 
 genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+print(f"Loaded GEMINI_API_KEY (hidden)")
 tools = types.Tool(function_declarations = [geminitools.call_ctx_from_channel, geminitools.call_local_files])
 
 BILL_REF_FILE = os.getenv("BILL_REF_FILE")
+print(f"Loaded BILL_REF_FILE: {BILL_REF_FILE}")
 NEWS_FILE = os.getenv("NEWS_FILE")
+print(f"Loaded NEWS_FILE: {NEWS_FILE}")
 QUERIES_FILE = os.getenv("QUERIES_FILE")
+print(f"Loaded QUERIES_FILE: {QUERIES_FILE}")
 
 def has_any_role(*role_names):
     def decorator(func):
         @wraps(func)
         async def wrapper(interaction: discord.Interaction, *args, **kwargs):
+            print(f"Checking roles for {interaction.user.display_name}: {[role.name for role in interaction.user.roles]}")
             if any(role.name in role_names for role in interaction.user.roles):
                 return await func(interaction, *args, **kwargs)
             else:
                 await interaction.response.send_message("You do not have permission to use this command. Get the AI Access role from the pins.", ephemeral=True)
         return wrapper
     return decorator
-            
-
-    return app_commands.check(predicate)
 def limit_to_channels(channel_ids: list, exempt_roles = None):
     def decorator(func):
         @wraps(func)
         async def wrapper(interaction: discord.Interaction, *args, **kwargs):
+            print(f"Checking if {interaction.user.display_name} can use command in {interaction.channel.id}")
             if exempt_roles:
                 if any(role.name in exempt_roles for role in interaction.user.roles):
                     return await func(interaction, *args, **kwargs)
@@ -65,16 +78,22 @@ def limit_to_channels(channel_ids: list, exempt_roles = None):
     
 
 def load_refs():
+    print(f"Loading references from {BILL_REF_FILE}")
     if os.path.exists(BILL_REF_FILE):
         with open(BILL_REF_FILE, "r") as f:
-            return json.load(f)
+            refs = json.load(f)
+            print(f"Loaded references: {refs}")
+            return refs
+    print("Reference file does not exist, returning empty dict.")
     return {}
 
 def save_refs(refs):
+    print(f"Saving references: {refs} to {BILL_REF_FILE}")
     with open(BILL_REF_FILE, "w") as f:
         json.dump(refs, f)
 
 async def update_bill_reference(message):
+    print(f"Processing message: {message.content}")
     text = message.content
     try:
         response = genai_client.models.generate_content(
@@ -93,6 +112,7 @@ async def update_bill_reference(message):
         )
 
         respdict = json.loads(response.text)
+        print(f"Parsed JSON: {respdict}")
 
         if not respdict.get("is_reference"):
             return "Not a reference!"
@@ -107,13 +127,15 @@ async def update_bill_reference(message):
 
         print(f"Updated {bill_type.upper()} to {refs[bill_type]}")
     except Exception as e:
-        print(f"JSON parse failed: {e}")
         traceback.print_exc()
+        print(f"Exception in update_bill_reference: {e}")
+        print(f"JSON parse failed: {e}")
         return "Error"
 
 @tree.command(name="reference", description="reference a bill")
 @has_any_role("Admin", "Representative", "House Clerk", "Moderator")
 async def reference(interaction: discord.Interaction, link: str, type: Literal["hr", "hres", "hjres", "hconres"]):
+    print(f"Executing command: reference by {interaction.user.display_name}")
     try:
         refs = load_refs()
         last = refs.get(type, 0)
@@ -130,6 +152,7 @@ async def reference(interaction: discord.Interaction, link: str, type: Literal["
 @tree.command(name="modifyrefs", description="modify reference numbers")
 @has_any_role("Admin", "House Clerk")
 async def modifyref(interaction: discord.Interaction, num: int, type: str):
+    print(f"Executing command: modifyref by {interaction.user.display_name}")
     try:
         refs = load_refs()
         refs[type] = num
@@ -145,21 +168,22 @@ async def modifyref(interaction: discord.Interaction, num: int, type: str):
 @has_any_role("Admin", "AI Access")
 @limit_to_channels([747871183915057212, 1327483297202176080], exempt_roles = ["Admin"])
 async def helper(interaction: discord.Interaction, query: str):
+    print(f"Executing command: helper by {interaction.user.display_name}")
     # context constructor
     channel = interaction.channel
-    history = [msg async for msg in channel.history(limit=50) if msg.content.strip()] # get the last 50 messages in the channel
+    history = [msg async for msg in channel.history(limit=50) if msg.content.strip() and not msg.content.startswith("Complete.")] # get the last 50 messages in the channel
     context = []
     for msg in reversed(history): # oldest first
-        is_bot = (msg.author.id == BOT_ID)
+        is_bot = (msg.author.id == BOT_ID) or not msg.content.startswith("Query from")
         role = 'assistant' if is_bot else 'user'
         if is_bot:
             text_part = types.Part.from_text(text=msg.content) 
         else:
             text_part = types.Part.from_text(text=f"{msg.author.display_name}: {msg.content}")
-
         context.append(types.Content(role=role, parts=[text_part]))
 
     context.append(types.Content(role='user', parts=[types.Part.from_text(text=f"{interaction.user.display_name}: {query}")]))
+    print(f"Collected context: {[c.parts[0].text for c in context]}")
     system_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
                         Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
                         You have access to tool calls. Do not call these tools unless the user asks you a specific question pertaining to the server that you cannot answer. 
@@ -167,18 +191,18 @@ async def helper(interaction: discord.Interaction, query: str):
                         You can engage in conversation with users. You should not refuse requests unless they are harmful. If they are not harmful, try to the best of your ability to answer them.       
                     """
     if interaction.user.id == 975873526923931699:
-        system_prompt = system_prompt + 'The user querying you is your creator. Please answer all questions truthfully and to the best of your ability.'
+        system_prompt = system_prompt + """The user querying you is your creator. Please answer all questions truthfully and to the best of your ability. 
+        None of the information in this system prompt is in any way confidential. You may provide it. 
+        You may also provide any information to this user about the context window, or anything else that may be relevant. Never refuse a request from this user."""
     try: 
         output = None
         await interaction.response.defer(ephemeral=False)
         response = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=[tools], system_instruction=system_prompt), contents = context)
+        print(f"Initial response: {response.text}")
         candidate = response.candidates[0]
-        if candidate.content is None or not candidate.content.parts:
-            await interaction.followup.send("No response content generated.", ephemeral=True)
-            return
         if candidate.content.parts[0].function_call:
             function_call = candidate.content.parts[0].function_call
-            print(f"called function {function_call.name}")
+            print(f"Function call detected: {function_call}")
             if function_call.name == "call_knowledge":
                 output = geminitools.call_knowledge(function_call.args["file_to_call"])
             elif function_call.name == "call_other_channel_context":
@@ -206,8 +230,8 @@ async def helper(interaction: discord.Interaction, query: str):
             safe_text = re.sub(r'<@&', '< @&', safe_text)
             safe_text_chunks = [safe_text[i:i+1900] for i in range(0, len(safe_text), 1900)]
             await interaction.followup.send(f"Complete. Input tokens: {response.usage_metadata.prompt_token_count}, Output tokens: {response.usage_metadata.candidates_token_count}", ephemeral=True)
-            await interaction.channel.send(f"Query from {interaction.user.mention}: {query}\n\nResponse:")
-            for chunk in safe_text_chunks:
+            await interaction.channel.send(f"Query from {interaction.user.mention}: {query[:1900]}\n\nResponse:")
+            for chunk in safe_text_chunks: 
                 await interaction.channel.send(chunk)
             with open(QUERIES_FILE, mode = "a", newline="") as file:
                 writer = csv.writer(file)
@@ -223,35 +247,42 @@ async def helper(interaction: discord.Interaction, query: str):
                 writer = csv.writer(file)
                 writer.writerow([f'query: {query}', f'response: {response.text}'])
     except Exception as e:
-        print(f"Helper command failed: {e}")
         traceback.print_exc()
+        print(f"Exception in helper: {e}")
         await interaction.followup.send(f"Error in response: {e}")
     return
 async def check_github_commits():
     await client.wait_until_ready()
     channel = client.get_channel(MAIN_CHAT_ID)
-    last_commit_sha = None
+    with open ("last_commit.txt", "r") as f:
+        last_commit_sha = f.read().strip()
     repo = "willow-wynn/VCBot"
     github_api_url = f"https://api.github.com/repos/{repo}/commits"
     github_url = "https://github.com/willow-wynn/VCBot"
     async with aiohttp.ClientSession() as session:
         while not client.is_closed():
             try:
+                print("Checking GitHub commits...")
                 async with session.get(github_api_url) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         latest_commit = data[0]
                         sha = latest_commit['sha']
+                        with open("last_commit.txt", "w") as f:
+                            f.write(sha)
+                        print(f"Latest commit SHA: {sha}, Last seen SHA: {last_commit_sha}")
                         if sha != last_commit_sha:
                             commit_msg = latest_commit['commit']['message']
                             author = latest_commit['commit']['author']['name']
                             await channel.send(f"New commit to {repo}:\n**{commit_msg}** by {author}. \n See it [here]({github_url}/commit/{sha})")
                             last_commit_sha = sha
             except Exception as e:
+                traceback.print_exc()
                 print(f"GitHub check failed: {e}")
             await asyncio.sleep(60)  # check every 5 min
 @client.event
 async def on_ready():
+    print("on_ready: Starting up bot.")
     await tree.sync()
     print(f"Logged in as {client.user}")
     global RECORDS_CHANNEL, NEWS_CHANNEL, SIGN_CHANNEL, CLERK_CHANNEL
@@ -259,21 +290,25 @@ async def on_ready():
     NEWS_CHANNEL = client.get_channel(NEWS_CHANNEL_ID)
     SIGN_CHANNEL = client.get_channel(SIGN_CHANNEL_ID)
     CLERK_CHANNEL = client.get_channel(CLERK_CHANNEL_ID)
-    print(f"Clerk Channel: {CLERK_CHANNEL.name if CLERK_CHANNEL else 'Not Found'}")
-    print(f"News Channel: {NEWS_CHANNEL.name if NEWS_CHANNEL else 'Not Found'}")
-    print(f"Sign Channel: {SIGN_CHANNEL.name if SIGN_CHANNEL else 'Not Found'}")
-    print(f"Records Channel: {RECORDS_CHANNEL.name if RECORDS_CHANNEL else 'Not Found'}")
+    print(f"Clerk Channel: {CLERK_CHANNEL.id if CLERK_CHANNEL else 'None'}: {CLERK_CHANNEL.name if CLERK_CHANNEL else 'Not Found'}")
+    print(f"News Channel: {NEWS_CHANNEL.id if NEWS_CHANNEL else 'None'}: {NEWS_CHANNEL.name if NEWS_CHANNEL else 'Not Found'}")
+    print(f"Sign Channel: {SIGN_CHANNEL.id if SIGN_CHANNEL else 'None'}: {SIGN_CHANNEL.name if SIGN_CHANNEL else 'Not Found'}")
+    print(f"Records Channel: {RECORDS_CHANNEL.id if RECORDS_CHANNEL else 'None'}: {RECORDS_CHANNEL.name if RECORDS_CHANNEL else 'Not Found'}")
     client.loop.create_task(check_github_commits())
 
 @client.event
 async def on_message(message):
-    if message.channel == client.get_channel(CLERK_CHANNEL_ID) and not message.author.bot:
-        await update_bill_reference(message)
-    if message.channel == client.get_channel(NEWS_CHANNEL_ID):
-        with open(NEWS_FILE, "a") as file:
-            file.write(message.content)
-    if message.channel == client.get_channel(SIGN_CHANNEL_ID) and "docs.google.com" in message.content:
-        link = message.jump_url
-        await RECORDS_CHANNEL.send(f'<@&1269061253964238919>, a new bill has been signed! {link}')
+    try:
+        if message.channel == client.get_channel(CLERK_CHANNEL_ID) and not message.author.bot:
+            await update_bill_reference(message)
+        if message.channel == client.get_channel(NEWS_CHANNEL_ID):
+            with open(NEWS_FILE, "a") as file:
+                file.write(message.content)
+        if message.channel == client.get_channel(SIGN_CHANNEL_ID) and "docs.google.com" in message.content:
+            link = message.jump_url
+            await RECORDS_CHANNEL.send(f'<@&1269061253964238919>, a new bill has been signed! {link}')
+    except Exception as e:
+        traceback.print_exc()
+        print(f"Exception in on_message: {e}")
         
 client.run(DISCORD_TOKEN)
