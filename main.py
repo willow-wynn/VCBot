@@ -172,8 +172,12 @@ async def helper(interaction: discord.Interaction, query: str):
         output = None
         await interaction.response.defer(ephemeral=False)
         response = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=[tools], system_instruction=system_prompt), contents = context)
-        if response.candidates[0].content.parts[0].function_call:
-            function_call = response.candidates[0].content.parts[0].function_call
+        candidate = response.candidates[0]
+        if candidate.content is None or not candidate.content.parts:
+            await interaction.followup.send("No response content generated.", ephemeral=True)
+            return
+        if candidate.content.parts[0].function_call:
+            function_call = candidate.content.parts[0].function_call
             print(f"called function {function_call.name}")
             if function_call.name == "call_knowledge":
                 output = geminitools.call_knowledge(function_call.args["file_to_call"])
