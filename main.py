@@ -40,7 +40,7 @@ print(f"Loaded MAIN_CHAT_ID: {MAIN_CHAT_ID}")
 
 genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 print(f"Loaded GEMINI_API_KEY (hidden)")
-tools = types.Tool(function_declarations = [geminitools.call_ctx_from_channel, geminitools.call_local_files])
+tools = types.Tool(function_declarations = [geminitools.call_ctx_from_channel, geminitools.call_local_files, geminitools.call_bill_search])
 
 BILL_REF_FILE = os.getenv("BILL_REF_FILE")
 print(f"Loaded BILL_REF_FILE: {BILL_REF_FILE}")
@@ -217,6 +217,16 @@ async def helper(interaction: discord.Interaction, query: str):
                 )
                 print(f"Retrieved {len(raw_msgs)} messages.")
                 output = "\n".join(f"{msg.author}: {msg.content}" for msg in raw_msgs)
+            elif function_call.name == "call_bill_search":
+                print("Calling search_bills with args:")
+                print(f"Channel: {function_call.args['query']}")
+                print(f"Num Messages: {function_call.args['top_k']}")
+                print(f"Search Query: {function_call.args.get('reconstruct_bills_from_chunks')}")
+                output = geminitools.search_bills(
+                    function_call.args["query"],
+                    function_call.args["top_k"],
+                    function_call.args.get("reconstruct_bills_from_chunks"),
+                )
             if output:
                 context.append(f"On your last turn, you called function {function_call.name}. The function call returned the following: {output}")
             new_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
@@ -265,7 +275,6 @@ async def check_github_commits():
     async with aiohttp.ClientSession() as session:
         while not client.is_closed():
             try:
-                print("Checking GitHub commits...")
                 async with session.get(github_api_url) as resp:
                     if resp.status == 200:
                         data = await resp.json()
@@ -273,7 +282,6 @@ async def check_github_commits():
                         sha = latest_commit['sha']
                         with open("last_commit.txt", "w") as f:
                             f.write(sha)
-                        print(f"Latest commit SHA: {sha}, Last seen SHA: {last_commit_sha}")
                         if sha != last_commit_sha:
                             commit_msg = latest_commit['commit']['message']
                             author = latest_commit['commit']['author']['name']
