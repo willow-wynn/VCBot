@@ -54,21 +54,21 @@ def has_any_role(*role_names):
         @wraps(func)
         async def wrapper(interaction: discord.Interaction, *args, **kwargs):
             print(f"Checking roles for {interaction.user.display_name}: {[role.name for role in interaction.user.roles]}")
-            if any(role.name in role_names for role in interaction.user.roles):
-                return await func(interaction, *args, **kwargs)
-            else:
+            if not any(role.name in role_names for role in interaction.user.roles):
                 await interaction.response.send_message("You do not have permission to use this command. Get the AI Access role from the pins.", ephemeral=True)
+                return
+            return await func(interaction, *args, **kwargs)
         return wrapper
     return decorator
-def limit_to_channels(channel_ids: list, exempt_roles = None):
+
+def limit_to_channels(channel_ids: list, exempt_roles=None):
     def decorator(func):
         @wraps(func)
         async def wrapper(interaction: discord.Interaction, *args, **kwargs):
             print(f"Checking if {interaction.user.display_name} can use command in {interaction.channel.id}")
-            if exempt_roles:
-                if any(role.name in exempt_roles for role in interaction.user.roles):
-                    return await func(interaction, *args, **kwargs)
-            elif interaction.channel.id not in channel_ids:
+            if exempt_roles and any(role.name in exempt_roles for role in interaction.user.roles):
+                return await func(interaction, *args, **kwargs)
+            if interaction.channel.id not in channel_ids:
                 await interaction.response.send_message("This command can only be used in specific channels.", ephemeral=True)
                 return
             return await func(interaction, *args, **kwargs)
@@ -237,7 +237,10 @@ async def helper(interaction: discord.Interaction, query: str):
                 writer = csv.writer(file)
                 writer.writerow([f'query: {query}', f'response: {safe_text}'])
         else: 
-            chunks = [response.text[i:i+1900] for i in range(0, len(response.text), 1900)]
+            safe_text = re.sub(r'@everyone', '@ everyone', response.text)
+            safe_text = re.sub(r'@here', '@ here', safe_text)
+            safe_text = re.sub(r'<@&', '< @&', safe_text)
+            chunks = [safe_text[i:i+1900] for i in range(0, len(safe_text), 1900)]
             await interaction.followup.send(f"Complete. Input tokens: {response.usage_metadata.prompt_token_count}, Output tokens: {response.usage_metadata.candidates_token_count}", ephemeral=True)
             await interaction.channel.send(f"Query from {interaction.user.mention}: {query}\n\nResponse:")
             for chunk in chunks:
