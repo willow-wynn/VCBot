@@ -18,7 +18,7 @@ from functools import wraps
 
 load_dotenv()
 
-BOT_ID = os.getenv("BOT_ID")
+BOT_ID = int(os.getenv("BOT_ID"))
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 RECORDS_CHANNEL_ID = int(os.getenv("RECORDS_CHANNEL"))
 NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL"))
@@ -42,7 +42,7 @@ def has_any_role(*role_names):
             if any(role.name in role_names for role in interaction.user.roles):
                 return await func(interaction, *args, **kwargs)
             else:
-                await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+                await interaction.response.send_message("You do not have permission to use this command. Get the AI Access role from the pins.", ephemeral=True)
         return wrapper
     return decorator
             
