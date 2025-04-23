@@ -145,15 +145,20 @@ async def modifyref(interaction: discord.Interaction, num: int, type: str):
 @has_any_role("Admin", "AI Access")
 @limit_to_channels([747871183915057212, 1327483297202176080], exempt_roles = ["Admin"])
 async def helper(interaction: discord.Interaction, query: str):
+    # context constructor
     channel = interaction.channel
-    history = [msg async for msg in channel.history(limit=50) if msg.content.strip()]
-    context = [
-        types.Content(
-            role='user' if msg.content.startswith("Query from") else ('assistant' if msg.author.id == BOT_ID else 'user'),
-            parts=[types.Part.from_text(text=f"{msg.author.display_name} at {msg.created_at}:\n{msg.content}")]
-        )
-        for msg in reversed(history) # <--- reverse here
-    ]
+    history = [msg async for msg in channel.history(limit=50) if msg.content.strip()] # get the last 50 messages in the channel
+    context = []
+    for msg in reversed(history): # oldest first
+        is_bot = (msg.author.id == BOT_ID)
+        role = 'assistant' if is_bot else 'user'
+        if is_bot:
+            text_part = types.Part.from_text(text=msg.content) 
+        else:
+            text_part = types.Part.from_text(text=f"{msg.author.display_name}: {msg.content}")
+
+        context.append(types.Content(role=role, parts=[text_part]))
+
     context.append(types.Content(role='user', parts=[types.Part.from_text(text=f"{interaction.user.display_name}: {query}")]))
     system_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
                         Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
