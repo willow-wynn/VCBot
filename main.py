@@ -36,19 +36,28 @@ NEWS_FILE = os.getenv("NEWS_FILE")
 QUERIES_FILE = os.getenv("QUERIES_FILE")
 
 def has_any_role(*role_names):
-    async def predicate(interaction: discord.Interaction):
-        return any(role.name in role_names for role in interaction.user.roles)
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(interaction: discord.Interaction, *args, **kwargs):
+            if any(role.name in role_names for role in interaction.user.roles):
+                return await func(interaction, *args, **kwargs)
+            else:
+                await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return wrapper
+    return decorator
+            
+
     return app_commands.check(predicate)
 def limit_to_channels(channel_ids: list, exempt_roles = None):
     def decorator(func):
         @wraps(func)
         async def wrapper(interaction: discord.Interaction, *args, **kwargs):
-            if interaction.channel.id not in channel_ids:
-                await interaction.response.send_message("This command can only be used in specific channels.", ephemeral=True)
-                return
             if exempt_roles:
                 if any(role.name in exempt_roles for role in interaction.user.roles):
                     return await func(interaction, *args, **kwargs)
+            elif interaction.channel.id not in channel_ids:
+                await interaction.response.send_message("This command can only be used in specific channels.", ephemeral=True)
+                return
             return await func(interaction, *args, **kwargs)
         return wrapper
     return decorator
