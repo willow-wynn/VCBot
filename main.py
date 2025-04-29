@@ -16,6 +16,20 @@ from config import KNOWLEDGE_FILES
 import traceback
 from functools import wraps
 
+# unified sanitization utility
+def sanitize(text: str) -> str:
+    """
+    prevent accidental mass‑pings and unwanted role mentions.
+    breaks @everyone, @here, and role mentions (<@&ROLE_ID).
+    """
+    if text is None:
+        return text
+    return (
+        text.replace("@everyone", "@ everyone")
+            .replace("@here", "@ here")
+            .replace("<@&", "< @&")
+    )
+
 def traced_load_dotenv():
     print("Loading environment variables from .env")
     load_dotenv()
@@ -48,6 +62,11 @@ NEWS_FILE = os.getenv("NEWS_FILE")
 print(f"Loaded NEWS_FILE: {NEWS_FILE}")
 QUERIES_FILE = os.getenv("QUERIES_FILE")
 print(f"Loaded QUERIES_FILE: {QUERIES_FILE}")
+
+async def safe_send(channel, content, **kwargs):
+    content = sanitize(content)
+    kwargs['allowed_mentions'] = discord.AllowedMentions(everyone=False, roles=False)
+    return await channel.send(content, **kwargs)
 
 def has_any_role(*role_names):
     def decorator(func):
@@ -166,7 +185,7 @@ async def modifyref(interaction: discord.Interaction, num: int, type: str):
 
 @tree.command(name="helper", description="Query the VCBot helper.")
 @has_any_role("Admin", "AI Access")
-@limit_to_channels([747871183915057212, 1327483297202176080], exempt_roles = ["Admin"])
+@limit_to_channels([1327483297202176080])
 async def helper(interaction: discord.Interaction, query: str):
     print(f"Executing command: helper by {interaction.user.display_name}")
     # context constructor
@@ -235,9 +254,7 @@ async def helper(interaction: discord.Interaction, query: str):
                         On a previous turn, you called tools. Now, your job is to respond to the user.
                         Provide your response to the user now. Do not directly output the contents of the function calls. Summarize unless explicitly requested."""
             response2 = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=None, system_instruction = new_prompt), contents = context)
-            safe_text = re.sub(r'@everyone', '@ everyone', response2.text)
-            safe_text = re.sub(r'@here', '@ here', safe_text)
-            safe_text = re.sub(r'<@&', '< @&', safe_text)
+            safe_text = sanitize(response2.text)
             safe_text_chunks = [safe_text[i:i+1900] for i in range(0, len(safe_text), 1900)]
             await interaction.followup.send(f"Complete. Input tokens: {response.usage_metadata.prompt_token_count}, Output tokens: {response.usage_metadata.candidates_token_count}", ephemeral=True)
             await interaction.channel.send(f"Query from {interaction.user.mention}: {query[:1900]}\n\nResponse:")
@@ -247,9 +264,7 @@ async def helper(interaction: discord.Interaction, query: str):
                 writer = csv.writer(file)
                 writer.writerow([f'query: {query}', f'response: {safe_text}'])
         else: 
-            safe_text = re.sub(r'@everyone', '@ everyone', response.text)
-            safe_text = re.sub(r'@here', '@ here', safe_text)
-            safe_text = re.sub(r'<@&', '< @&', safe_text)
+            safe_text = sanitize(response.text)
             chunks = [safe_text[i:i+1900] for i in range(0, len(safe_text), 1900)]
             await interaction.followup.send(f"Complete. Input tokens: {response.usage_metadata.prompt_token_count}, Output tokens: {response.usage_metadata.candidates_token_count}", ephemeral=True)
             await interaction.channel.send(f"Query from {interaction.user.mention}: {query}\n\nResponse:")
@@ -266,7 +281,7 @@ async def helper(interaction: discord.Interaction, query: str):
     return
 async def check_github_commits():
     await client.wait_until_ready()
-    channel = client.get_channel(MAIN_CHAT_ID)
+    channel = client.get_channel(1327483297202176080)
     with open ("last_commit.txt", "r") as f:
         last_commit_sha = f.read().strip()
     repo = "willow-wynn/VCBot"
@@ -284,9 +299,7 @@ async def check_github_commits():
                             f.write(sha)
                         if sha != last_commit_sha:
                             commit_msg = latest_commit['commit']['message']
-                            commit_msg = re.sub(r'@everyone', '@ everyone', commit_msg)
-                            commit_msg = re.sub(r'@here', '@ here', commit_msg)
-                            commit_msg = re.sub(r'<@&', '< @&', commit_msg)
+                            commit_msg = sanitize(commit_msg)
                             author = latest_commit['commit']['author']['name']
                             await channel.send(f"New commit to {repo}:\n**{commit_msg}** by {author}. \n See it [here]({github_url}/commit/{sha})")
                             last_commit_sha = sha
