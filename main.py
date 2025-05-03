@@ -246,13 +246,13 @@ async def helper(interaction: discord.Interaction, query: str):
                     function_call.args["top_k"],
                     function_call.args.get("reconstruct_bills_from_chunks"),
                 )
-            if output:
-                context.append(f"On your last turn, you called function {function_call.name}. The function call returned the following: {output}")
             new_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
                         Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
-                        You have access to tool calls. Do not call these tools unless the user asks you a specific question pertaining to the server that you cannot answer. 
                         On a previous turn, you called tools. Now, your job is to respond to the user.
-                        Provide your response to the user now. Do not directly output the contents of the function calls. Summarize unless explicitly requested."""
+                        On your last turn, you called function {function_call.name}. The function call returned the following: {output if output else "No output"}"
+                        Provide your response to the user now. Do not directly output the contents of the function calls. Summarize unless explicitly requested.
+                        {"You called a bill search function from an RAG system. The bills below may not be accurate or up to date with the user's query. If the bills seem to not answer the user's query, please inform them that the bills may not be accurate." if function_call.name == "call_bill_search" else ""}
+                        You no longer have access to tool calls. Do not attempt to call tools on this turn. You must now respond to the user."""
             response2 = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=None, system_instruction = new_prompt), contents = context)
             safe_text = sanitize(response2.text)
             safe_text_chunks = [safe_text[i:i+1900] for i in range(0, len(safe_text), 1900)]

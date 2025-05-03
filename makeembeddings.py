@@ -7,7 +7,7 @@ from transformers import AutoTokenizer # Using AutoTokenizer to count tokens acc
 
 # --- Configuration ---
 pdf_folder = "/Users/wynndiaz/VCBot/every-vc-bill/pdfs"
-model_path = "/Users/wynndiaz/VCBot/test_model"
+model_path = "/Users/wynndiaz/VCBot/final_model"
 output_path = "/Users/wynndiaz/VCBot/vectors.pkl"
 chunk_size_tokens = 512
 overlap_tokens = 50
