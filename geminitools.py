@@ -115,6 +115,7 @@ def search_bills(query: str, top_k: int, reconstruct_bills_from_chunks: bool):
             [{'score': float, 'metadata': dict, 'text': str}]
         Returns an error dictionary {'error': str} if model loading or search fails significantly.
         Returns an empty list [] if search completes but finds no relevant chunks.
+        You MUST include ALL args.
     """
     print(f"\n--- Running Bill Search ---")
     print(f"Query: '{query}'")

@@ -1,20 +1,15 @@
-from google import genai
-import aiohttp
-import re
+from google import genai 
 from google.genai import types
 import discord
 from discord import app_commands
-import asyncio
+import aiohttp, re, asyncio, os, json, csv, traceback, datetime, requests
 from dotenv import load_dotenv
-import os
-import json
 from typing import Literal
-import geminitools
-import csv
 from botcore import intents, client, tree
 from config import KNOWLEDGE_FILES
-import traceback
+import geminitools
 from functools import wraps
+
 
 # unified sanitization utility
 def sanitize(text: str) -> str:
@@ -29,6 +24,24 @@ def sanitize(text: str) -> str:
             .replace("@here", "@ here")
             .replace("<@&", "< @&")
     )
+
+import requests
+import re
+
+def fetch_public_gdoc_text(gdoc_url):
+    # extract file id
+    match = re.search(r"/document/d/([a-zA-Z0-9-_]+)", gdoc_url)
+    if not match:
+        raise ValueError("invalid gdoc url")
+    file_id = match.group(1)
+
+    export_url = f"https://docs.google.com/document/d/{file_id}/export?format=txt"
+    resp = requests.get(export_url)
+    
+    if resp.status_code != 200:
+        raise RuntimeError(f"failed to fetch doc: status {resp.status_code}")
+    
+    return resp.text
 
 def traced_load_dotenv():
     print("Loading environment variables from .env")
@@ -62,11 +75,6 @@ NEWS_FILE = os.getenv("NEWS_FILE")
 print(f"Loaded NEWS_FILE: {NEWS_FILE}")
 QUERIES_FILE = os.getenv("QUERIES_FILE")
 print(f"Loaded QUERIES_FILE: {QUERIES_FILE}")
-
-async def safe_send(channel, content, **kwargs):
-    content = sanitize(content)
-    kwargs['allowed_mentions'] = discord.AllowedMentions(everyone=False, roles=False)
-    return await channel.send(content, **kwargs)
 
 def has_any_role(*role_names):
     def decorator(func):
@@ -207,7 +215,8 @@ async def helper(interaction: discord.Interaction, query: str):
                         Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
                         You have access to tool calls. Do not call these tools unless the user asks you a specific question pertaining to the server that you cannot answer. 
                         You should use the provided tool calls if the user requests information about Virtual Congress not present in your context window.   
-                        You can engage in conversation with users. You should not refuse requests unless they are harmful. If they are not harmful, try to the best of your ability to answer them.       
+                        You can engage in conversation with users. You should not refuse requests unless they are harmful. If they are not harmful, try to the best of your ability to answer them.    
+                        Today is {datetime.date.today()}.
                     """
     if interaction.user.id == 975873526923931699:
         system_prompt = system_prompt + """The user querying you is your creator. Please answer all questions truthfully and to the best of your ability. 
@@ -249,10 +258,11 @@ async def helper(interaction: discord.Interaction, query: str):
             new_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
                         Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
                         On a previous turn, you called tools. Now, your job is to respond to the user.
-                        On your last turn, you called function {function_call.name}. The function call returned the following: {output if output else "No output"}"
+                        On your last turn, you called a tool. The function call returned the following: {output if output else "No output"}"
                         Provide your response to the user now. Do not directly output the contents of the function calls. Summarize unless explicitly requested.
-                        {"You called a bill search function from an RAG system. The bills below may not be accurate or up to date with the user's query. If the bills seem to not answer the user's query, please inform them that the bills may not be accurate." if function_call.name == "call_bill_search" else ""}
-                        You no longer have access to tool calls. Do not attempt to call tools on this turn. You must now respond to the user."""
+                        {"You called a bill search from an RAG system. The bills below may not be accurate or up to date with the user's query. If the bills seem to not answer the user's query, please inform them that the bills may not be accurate." if function_call.name == "call_bill_search" else ""}
+                        You no longer have access to tool calls. Do not attempt to call tools on this turn. You must now respond to the user.
+                        Today is {datetime.date.today()}."""
             response2 = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=None, system_instruction = new_prompt), contents = context)
             safe_text = sanitize(response2.text)
             safe_text_chunks = [safe_text[i:i+1900] for i in range(0, len(safe_text), 1900)]
@@ -279,6 +289,46 @@ async def helper(interaction: discord.Interaction, query: str):
         print(f"Exception in helper: {e}")
         await interaction.followup.send(f"Error in response: {e}")
     return
+@tree.command(name="econ_impact_report", description="Get a detailed economic impact report on a given piece of legislation.")
+@has_any_role("Admin", "Events Team")
+@limit_to_channels([1327483297202176080])
+async def model_economic_impact(interaction: discord.Interaction, bill_link: str):
+    """Provided a bill, generates an economic impact statement that indicates how such a bill would impact the economy.
+    """
+    try:
+        bill_text = fetch_public_gdoc_text(bill_link)
+    except Exception as e:
+        print(f"Error fetching Google Doc: {e}")
+        await interaction.response.send_message(f"Error fetching Google Doc: {e}", ephemeral=True)
+        return
+    print(f"Fetched Google Doc text: {bill_text[:100]}...") 
+    recent_news = [msg.content async for msg in NEWS_CHANNEL.history(limit=50) if msg.content.strip()]
+    system_prompt = f"""You are a legislative assistant for the Virtual Congress Discord server. You are given a chunk of text from a legislative document.
+    You will be generating an economic impact statement that indicates how such a bill would impact the economy.
+    Your goal is to generate a full detailed economic impact statement.
+    Recent news is presented below: {recent_news}.
+    You will be provided a bill by the user."""
+    context = [types.Content(role='user', parts=[types.Part.from_text(text=f"{interaction.user.display_name}: {bill_text}")])]
+    try:
+        output = None
+        await interaction.response.defer(ephemeral=False)
+        response = genai_client.models.generate_content(model='gemini-2.5-flash', config = types.GenerateContentConfig(tools=None, system_instruction=system_prompt), contents = context)
+        safe_text = sanitize(response.text)
+        chunks = [safe_text[i:i+1900] for i in range(0, len(safe_text), 1900)]
+        await interaction.followup.send(f"Complete. Input tokens: {response.usage_metadata.prompt_token_count}, Output tokens: {response.usage_metadata.candidates_token_count}", ephemeral=True)
+        await interaction.channel.send(f"Query from {interaction.user.mention}: Generate economic impact report on {bill_link}. \n\nResponse:")
+        for chunk in chunks:
+            await interaction.channel.send(chunk)
+        print(response.text)
+        with open(QUERIES_FILE, mode = "a", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow([f'query: {system_prompt + bill_text}', f'response: {response.text}'])
+    except Exception as e:
+        traceback.print_exc()
+        print(f"Error generating economic impact report: {e}")
+        await interaction.followup.send(f"Error generating content: {e}", ephemeral=True)
+        return
+
 async def check_github_commits():
     await client.wait_until_ready()
     channel = client.get_channel(1327483297202176080)

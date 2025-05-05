@@ -5,7 +5,7 @@ import torch
 import traceback
 import os
 
-model_path = "/Users/wynndiaz/VCBot/test_model"
+model_path = "/Users/wynndiaz/VCBot/final_model"
 vector_pkl = "/Users/wynndiaz/VCBot/vectors.pkl"
 _MODEL = None
 def load_search_model(model_path):

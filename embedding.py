@@ -4,10 +4,11 @@ import pdfplumber
 
 from llama_index.core.schema import Document
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core.prompts import PromptTemplate
-from llama_index.llms.ollama import Ollama
+from llama_index.core.prompts import PromptTemplate, BasePromptTemplate
+from llama_index.llms.lmstudio import LMStudio
 from llama_index.finetuning import generate_qa_embedding_pairs
 import random
+import pickle
 import logging
 logging.getLogger("pdfminer").setLevel(logging.ERROR) # so that pdfminer doesn't spam warning messages
 
@@ -17,111 +18,85 @@ pdf_dir = "pdfs"
 txt_dir = "txts"
 os.makedirs(txt_dir, exist_ok=True)
 
-for pdf_path in glob.glob(f"{pdf_dir}/*.pdf"):
-    name = os.path.splitext(os.path.basename(pdf_path))[0]
-    txt_path = f"{txt_dir}/{name}.txt"
-    with pdfplumber.open(pdf_path) as pdf:
-        pages = [p.extract_text() or "" for p in pdf.pages]
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write("\n\n".join(pages))
+cache_path = "/Users/wynndiaz/VCBot/every-vc-bill/cached_nodes.pkl"
+if os.path.exists(cache_path):
+    print("Loading cached nodes...")
+    with open(cache_path, "rb") as f:
+        nodes = pickle.load(f)
+    print(f"loaded {len(nodes)} cached chunks from {cache_path}")
+else:
+    print("No cached nodes found, parsing documents...")
+    parser = SentenceSplitter(chunk_size=1024, chunk_overlap=50)
+    nodes = []
+    for txt_path in glob.glob(f"{txt_dir}/*.txt"):
+        with open(txt_path, encoding="utf-8") as f:
+            content = f.read() + ' '
+        doc = Document(text=content, doc_id=txt_path)
+        nodes.extend(parser.get_nodes_from_documents([doc]))
 
-parser = SentenceSplitter(chunk_size=4096, chunk_overlap=50)
-nodes = []
-for txt_path in glob.glob(f"{txt_dir}/*.txt"):
-    with open(txt_path, encoding="utf-8") as f:
-        content = f.read() + ' '
-    doc = Document(text=content, doc_id=txt_path)
-    nodes.extend(parser.get_nodes_from_documents([doc]))
 
+    print(f"parsed {len(nodes)} chunks")
 
-print(f"parsed {len(nodes)} chunks")
+    with open(cache_path, "wb") as f:
+        pickle.dump(nodes, f)
+    print(f"cached {len(nodes)} chunks to {cache_path}")
 
-gemma_chat_template_string = """{%- if messages[0]['role'] == 'system' -%}
-    {%- set system_message_content = messages[0]['content'] -%}
-    {%- set loop_messages = messages[1:] -%}
-{%- else -%}
-    {%- set system_message_content = '' -%}
-    {%- set loop_messages = messages -%}
-{%- endif -%}
-{%- for message in loop_messages -%}
-    {%- set is_user_turn = (loop.index0 + (1 if system_message_content else 0)) % 2 == 0 -%}
-    {%- if (message['role'] == 'user') != is_user_turn -%}
-        {{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}
-    {%- endif -%}
-    {%- if message['role'] == 'assistant' -%}
-        {%- set role = 'model' -%}
-    {%- else -%}
-        {%- set role = message['role'] -%}
-    {%- endif -%}
-<start_of_turn>{{ role }}
-{%- if loop.first and system_message_content -%}
-{{- system_message_content + '\n\n' -}}
-{%- endif -%}
-{{- message['content'] | trim -}}
-<end_of_turn>
-{% endfor %}
-{%- if add_generation_prompt %}
-<start_of_turn>model
-{%- endif -%}
-""" # if you use a model other than gemma replace the jinja2 chat template string here
-
-chat_template = PromptTemplate(
-    template=gemma_chat_template_string,  
-    template_format="jinja2",
+llm = LMStudio( # modify to openai/gemini model unless you have a NASA computer
+    model_name="mlx-community/qwen3-30b-a3b",
+    base_url="http://localhost:1234/v1",
 )
 
-llm = Ollama( # modify to openai/gemini model unless you have a NASA computer
-    model="gemma3:27B",
-    query_wrapper_prompt=chat_template, # Now uses the correctly defined template
-    max_new_tokens=4096,
-    context_window=8 * 4096,
-)
-
-
-data = generate_qa_embedding_pairs(nodes=nodes, llm=llm, save_every=10, retry_limit=5, num_questions_per_chunk = 3, verbose=True, output_path="qa_dataset_new.json") 
-# The above function is extremely computationally intensive if you use a local model. ~1MTok input, ~2MTok output. Costs between $1 and $30 depending on API used (gemini flash vs Claude Sonnet) if you use API.
-# Recommend M3/4 Max/Ultra with at least 48GB of unified memory or 2x RTX 3090 or better. Otherwise, use cloud model or rent H100
-# I had to monkey patch llama-index so that Gemma3 wouldn't generate boilerplate that gets passed into the pairs
-# Either use the built-in qa_generate_prompt_template argument or monkey patch the function in your library
-"""
-Context information is below.
+qa_prompt_template = """\
+You are a legislative assistant for a Discord server. You are given a chunk of text from a legislative document. 
+You will be generating synthetic questions that will be answered by the document to finetune an RAG model.
+The text you are given may be the beginning of a bill, or it may be a chunk of text from the middle or end of a bill.
+Please diversify your queries, as they should reflect the types of real queries that Discord users might ask when looking for information about legislation.
 
 ---------------------
 {context_str}
 ---------------------
 
-Given the context information and no prior knowledge, \
+Given the context information and no prior knowledge.
 generate only questions based on the below query.
 
-You are a Teacher/ Professor. Your task is to setup \
-{num_questions_per_chunk} questions for an upcoming \
-quiz/examination. The questions should be diverse in nature \
-across the document. Restrict the questions to the \
-context information provided. 
-Under absolutely no circumstances should you preface your questions with \
-"Here are" or any similar information. You should ONLY generate questions. 
+You are an LLM generating questions that will be used to finetune an RAG embedding model. Your task is to setup \
+{num_questions_per_chunk} questions that would be answered by the document in question. The questions should be diverse in nature \
+across the document. 
 
-BAD example:
-"Here are three questions based on..."
+Your questions should be in the form of questions that would be asked by a Discord user when querying a legislative assistant.
 
-GOOD example:
+For example: "What are some bills about [topic]?" or "When was the [bill in question] introduced?" or "What is the [bill in question] about?"
 
-"1) [question]
-2) [question]
-3) [question]"
+Do NOT under any circumstances include statements like "In this document" or "Under this bill" or "in this legislation" or "Under this Act". Your questions should primarily be based around asking which bills cover topics, not which topics are covered in the bill. 
 
-You are creating a QA dataset for an embedding model. This means that 2/3 or so of your questions should be *general legal questions*, the type that would occur over a very general query. For example, if the provided chunk is about abortion, you could ask "What are some bills that do x y and z with abortion"? 
+If the document in question contains the beginning of the bill, one of your questions must be "what are some bills written by [author's name here]?". IF THE DOCUMENT DOES NOT CONTAIN THE BEGINNING OF THE BILL, DO NOT ASK THIS QUESTION.
+Do not include agencies or offices in the author question, if one is present. Only include the name. Do not ask this question if the name is not in the chunk.
 
-Generally, your questions should focus on "which bills" - followed by a question answered in the document - rather than "In the document which..."
-""" # use this prompt
-data.save_json('/Users/wynndiaz/VCBot/qa_dataset_third.json') # if your initial pass fails and you need to run it again delete the file and change the name of the JSON that gets saved
+Use diverse formatting in how you ask your questions and do not start them with the same sentences/strings. Under absolutely no circumstances should you mention "This bill" or "This document" in your queries.
+
+If the chunk contains the DATE THE SPECIFIC BILL WAS INTRODUCED, you must include the question "What are some bills from [month, year]?". You must vary the wording you use; do not use this exact wording.
+
+All your questions should involve *which bill to retrieve*, not *the direct content of a predefined bill*. For example, do not ask questions about what line certain text is in, etc.
+VARY YOUR PHRASING. Your questions should be diverse and structured in diverse manners, as your goal is to simulate the types of questions legislators seeking information on past legislation might ask.
+You should ask simple queries as well, with varied language: "bills about", "find me some bills about", "bills that" "bills by"... etc.
+Under NO circumstances should you begin your questions with "here are..." or any other form of preamble. Respond ONLY with the questions. Do not number your questions.
+
+"""
+
+data = generate_qa_embedding_pairs(nodes=nodes, llm=llm, save_every=10, retry_limit=5, num_questions_per_chunk = 8, verbose=True, output_path="/Users/wynndiaz/VCBot/final_qa_dataset.json", qa_generate_prompt_tmpl=qa_prompt_template)
+# The above function is extremely computationally intensive if you use a local model. ~1MTok input, ~2MTok output. Costs between $1 and $30 depending on API used (gemini flash vs Claude Sonnet) if you use API.
+# Recommend M3/4 Max/Ultra with at least 48GB of unified memory or 2x RTX 3090 or better. Otherwise, use cloud model or rent H100
+# I had to monkey patch llama-index so that Gemma3 wouldn't generate boilerplate that gets passed into the pairs
+# Either use the built-in qa_generate_prompt_template argument or monkey patch the function in your library
+ # use this prompt
+data.save_json('/Users/wynndiaz/VCBot/final_qa_dataset.json') # if your initial pass fails and you need to run it again delete the file and change the name of the JSON that gets saved
 import json
 from sklearn.model_selection import train_test_split
 import copy 
-input_filepath = '/Users/wynndiaz/VCBot/qa_dataset_third.json'
-train_filepath = '/Users/wynndiaz/VCBot/train_dataset_third.json'
-val_filepath = '/Users/wynndiaz/VCBot/val_dataset)_third.json'
-val_split_ratio = 0.2 # 20% for validation
+input_filepath = '/Users/wynndiaz/VCBot/final_qa_dataset.json'
+train_filepath = '/Users/wynndiaz/VCBot/final_train_dataset.json'
+val_filepath = '/Users/wynndiaz/VCBot/final_val_dataset.json'
+val_split_ratio = 0.1 # 20% for validation
 
 # --- load data ---
 try:
