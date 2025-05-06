@@ -292,7 +292,7 @@ async def helper(interaction: discord.Interaction, query: str):
 @tree.command(name="econ_impact_report", description="Get a detailed economic impact report on a given piece of legislation.")
 @has_any_role("Admin", "Events Team")
 @limit_to_channels([1327483297202176080])
-async def model_economic_impact(interaction: discord.Interaction, bill_link: str):
+async def model_economic_impact(interaction: discord.Interaction, bill_link: str, additional_context: str = None):
     """Provided a bill, generates an economic impact statement that indicates how such a bill would impact the economy.
     """
     try:
@@ -308,17 +308,19 @@ async def model_economic_impact(interaction: discord.Interaction, bill_link: str
     Your goal is to generate a full detailed economic impact statement.
     Recent news is presented below: {recent_news}.
     You will be provided a bill by the user."""
+    if additional_context:
+        system_prompt = system_prompt + f"\n The user has provided additional information for you regarding the intended contents of your economic impact report: {additional_context}"
     context = [types.Content(role='user', parts=[types.Part.from_text(text=f"{interaction.user.display_name}: {bill_text}")])]
     try:
         output = None
         await interaction.response.defer(ephemeral=False)
-        response = genai_client.models.generate_content(model='gemini-2.5-flash', config = types.GenerateContentConfig(tools=None, system_instruction=system_prompt), contents = context)
+        response = genai_client.models.generate_content(model='gemini-2.5-flash-preview-04-17', config = types.GenerateContentConfig(tools=None, system_instruction=system_prompt), contents = context)
         safe_text = sanitize(response.text)
-        chunks = [safe_text[i:i+1900] for i in range(0, len(safe_text), 1900)]
         await interaction.followup.send(f"Complete. Input tokens: {response.usage_metadata.prompt_token_count}, Output tokens: {response.usage_metadata.candidates_token_count}", ephemeral=True)
-        await interaction.channel.send(f"Query from {interaction.user.mention}: Generate economic impact report on {bill_link}. \n\nResponse:")
-        for chunk in chunks:
-            await interaction.channel.send(chunk)
+        await interaction.channel.send(f"Query from {interaction.user.mention}: Generate economic impact report on {bill_link}. \n\nResponse is attached as a file.")
+        with open("econ_impact_report.txt", "w", encoding="utf-8") as f:
+            f.write(safe_text)
+        await interaction.channel.send(file=discord.File("econ_impact_report.txt"))
         print(response.text)
         with open(QUERIES_FILE, mode = "a", newline="") as file:
             writer = csv.writer(file)
