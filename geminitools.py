@@ -2,11 +2,14 @@ import os
 import discord
 import asyncio
 from botcore import intents, client, tree
-from config import KNOWLEDGE_FILES
+from config import KNOWLEDGE_FILES, BILL_TXT_STORAGE
 from dotenv import load_dotenv
 import traceback
 from collections import defaultdict
 from vector_search import search_vectors_simple, load_search_model, model_path, vector_pkl
+import pandas as pd
+import requests
+import re
 load_dotenv()
 GUILD_ID = int(os.getenv("GUILD"))
 
@@ -233,3 +236,28 @@ def search_bills(query: str, top_k: int, reconstruct_bills_from_chunks: bool):
 
         print(f"INFO: Returning {len(reconstructed_bills)} reconstructed bill(s).")
         return reconstructed_bills   
+def fetch_public_gdoc_text(gdoc_url):
+    # extract file id
+    match = re.search(r"/document/d/([a-zA-Z0-9-_]+)", gdoc_url)
+    if not match:
+        raise ValueError("invalid gdoc url")
+    file_id = match.group(1)
+
+    export_url = f"https://docs.google.com/document/d/{file_id}/export?format=txt"
+    resp = requests.get(export_url)
+    
+    if resp.status_code != 200:
+        raise RuntimeError(f"failed to fetch doc: status {resp.status_code}")
+    
+    return resp.text
+def bill_keyword_search(keyword: str):
+    bill_data = [
+        {"filename": name, "text": open(os.path.join(BILL_TXT_STORAGE, name), "r").read()}
+        for name in os.listdir(BILL_TXT_STORAGE)
+    ]
+    df = pd.DataFrame(bill_data)
+    mask = df["text"].str.contains(keyword, na=False, case=False)
+    return(df[mask])
+
+
+    

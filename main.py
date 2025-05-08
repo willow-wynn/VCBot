@@ -6,7 +6,7 @@ import aiohttp, re, asyncio, os, json, csv, traceback, datetime, requests
 from dotenv import load_dotenv
 from typing import Literal
 from botcore import intents, client, tree
-from config import KNOWLEDGE_FILES
+from config import KNOWLEDGE_FILES, BILL_TXT_STORAGE, BILL_DIRECTORIES
 import geminitools
 from functools import wraps
 
@@ -24,24 +24,32 @@ def sanitize(text: str) -> str:
             .replace("@here", "@ here")
             .replace("<@&", "< @&")
     )
+def sanitize_filename(name: str) -> str:
+    name = re.sub(r'[^\w\s.-]', '', name)
+    return name.strip()
 
-import requests
-import re
+async def add_bill_to_db(bill_link: str, database_type: Literal["bills"]) -> str:
+    bill_text = geminitools.fetch_public_gdoc_text(bill_link)
+    if not bill_text.strip():
+        raise ValueError("empty bill text")
 
-def fetch_public_gdoc_text(gdoc_url):
-    # extract file id
-    match = re.search(r"/document/d/([a-zA-Z0-9-_]+)", gdoc_url)
-    if not match:
-        raise ValueError("invalid gdoc url")
-    file_id = match.group(1)
+    resp = genai_client.models.generate_content(
+        model="gemini-2.0-flash-exp",
+        config=types.GenerateContentConfig(
+            system_instruction="Generate a filename for the bill. The filename should be in the format of 'Bill Title.txt'. The title should be a short description of the bill."
+        ),
+        contents=[types.Content(role='user', parts=[types.Part.from_text(text=bill_text)])]
+    )
+    bill_name = sanitize_filename(resp.text)
+    if not bill_name.lower().endswith(".txt"):
+        bill_name += ".txt"
 
-    export_url = f"https://docs.google.com/document/d/{file_id}/export?format=txt"
-    resp = requests.get(export_url)
-    
-    if resp.status_code != 200:
-        raise RuntimeError(f"failed to fetch doc: status {resp.status_code}")
-    
-    return resp.text
+    bill_dir = BILL_DIRECTORIES[database_type]
+    bill_location = os.path.join(bill_dir, bill_name)
+    with open(bill_location, "w", encoding="utf-8") as f:
+        f.write(bill_text)
+
+    return bill_location  # can use this to send file, log, etc.
 
 def traced_load_dotenv():
     print("Loading environment variables from .env")
@@ -296,7 +304,7 @@ async def model_economic_impact(interaction: discord.Interaction, bill_link: str
     """Provided a bill, generates an economic impact statement that indicates how such a bill would impact the economy.
     """
     try:
-        bill_text = fetch_public_gdoc_text(bill_link)
+        bill_text = geminitools.fetch_public_gdoc_text(bill_link)
     except Exception as e:
         print(f"Error fetching Google Doc: {e}")
         await interaction.response.send_message(f"Error fetching Google Doc: {e}", ephemeral=True)
@@ -330,6 +338,40 @@ async def model_economic_impact(interaction: discord.Interaction, bill_link: str
         print(f"Error generating economic impact report: {e}")
         await interaction.followup.send(f"Error generating content: {e}", ephemeral=True)
         return
+@tree.command(name="bill_keyboard_search", description="Perform a basic keyword search on the legislative corpus.")
+@has_any_role("Admin", "AI Access")
+@limit_to_channels([1327483297202176080])
+async def bill_keyboard_search(interaction: discord.Interaction, search_query: str):
+    """Perform a basic keyword search on the legislative corpus."""
+    returned_bills = geminitools.bill_keyword_search(search_query)
+    try:
+        await interaction.response.defer(ephemeral=False)
+        for _, row in returned_bills.iterrows():
+            name = row["filename"]
+            content = row["text"]
+            with open(name, "w", encoding="utf-8") as f:
+                f.write(content)
+            await interaction.channel.send(file=discord.File(name))
+            os.remove(name)
+        await interaction.followup.send(f"Complete. Found {len(returned_bills)} bills matching your query.", ephemeral=True)
+        
+    except Exception as e:
+        traceback.print_exc()
+        print(f"Error in bill_keyboard_search: {e}")
+        await interaction.followup.send(f"Error in response: {e}", ephemeral=True)
+
+@tree.command(name="add_bill", description="Add a bill to the legislative corpus.")
+@has_any_role("Admin")
+@limit_to_channels([1327483297202176080])
+async def add_bill(interaction: discord.Interaction, bill_link: str, database_type: Literal["bills"] = "bills"):
+    await interaction.response.defer(ephemeral=False)
+    try:
+        path = await add_bill_to_db(bill_link, database_type)
+        await interaction.channel.send(file=discord.File(path))
+        await interaction.followup.send(f"complete. added bill `{os.path.basename(path)}` to `{database_type}` db.", ephemeral=True)
+    except Exception as e:
+        traceback.print_exc()
+        await interaction.followup.send(f"error adding bill: {e}", ephemeral=True)
 
 async def check_github_commits():
     await client.wait_until_ready()
@@ -362,7 +404,6 @@ async def check_github_commits():
 @client.event
 async def on_ready():
     print("on_ready: Starting up bot.")
-    await tree.sync()
     print(f"Logged in as {client.user}")
     global RECORDS_CHANNEL, NEWS_CHANNEL, SIGN_CHANNEL, CLERK_CHANNEL
     RECORDS_CHANNEL = client.get_channel(RECORDS_CHANNEL_ID)
@@ -374,6 +415,9 @@ async def on_ready():
     print(f"Sign Channel: {SIGN_CHANNEL.id if SIGN_CHANNEL else 'None'}: {SIGN_CHANNEL.name if SIGN_CHANNEL else 'Not Found'}")
     print(f"Records Channel: {RECORDS_CHANNEL.id if RECORDS_CHANNEL else 'None'}: {RECORDS_CHANNEL.name if RECORDS_CHANNEL else 'Not Found'}")
     client.loop.create_task(check_github_commits())
+    print("Syncing commands...")
+    synced_commands = await tree.sync()
+    print(f"Commands synced: {synced_commands}" if synced_commands else "No commands to sync.")
 
 @client.event
 async def on_message(message):
