@@ -4,8 +4,9 @@ from sentence_transformers import SentenceTransformer, util
 import torch
 import traceback
 import os
+import config
 
-model_path = "/Users/wynndiaz/VCBot/final_model"
+model_path = config.MODEL_PATH
 vector_pkl = "/Users/wynndiaz/VCBot/vectors.pkl"
 _MODEL = None
 def load_search_model(model_path):

@@ -6,10 +6,10 @@ import aiohttp, re, asyncio, os, json, csv, traceback, datetime, requests
 from dotenv import load_dotenv
 from typing import Literal
 from botcore import intents, client, tree
-from config import KNOWLEDGE_FILES, BILL_TXT_STORAGE, BILL_DIRECTORIES
+from config import KNOWLEDGE_FILES, BILL_TXT_STORAGE, BILL_DIRECTORIES, MODEL_PATH, VECTOR_PKL, ALLOWED_ROLES_FOR_ROLES
 import geminitools
 from functools import wraps
-
+from makeembeddings import embed_txt_file
 
 # unified sanitization utility
 def sanitize(text: str) -> str:
@@ -48,7 +48,8 @@ async def add_bill_to_db(bill_link: str, database_type: Literal["bills"]) -> str
     bill_location = os.path.join(bill_dir, bill_name)
     with open(bill_location, "w", encoding="utf-8") as f:
         f.write(bill_text)
-
+    embed_txt_file(txt_path = bill_location, model_path = MODEL_PATH, chunk_size_tokens = 1024, overlap_tokens = 50, save_to = VECTOR_PKL)
+    print(f"Added bill to pickle") 
     return bill_location  # can use this to send file, log, etc.
 
 def traced_load_dotenv():
@@ -96,7 +97,7 @@ def has_any_role(*role_names):
         return wrapper
     return decorator
 
-def limit_to_channels(channel_ids: list, exempt_roles=None):
+def limit_to_channels(channel_ids: list, exempt_roles="Admin"):
     def decorator(func):
         @wraps(func)
         async def wrapper(interaction: discord.Interaction, *args, **kwargs):
@@ -110,7 +111,25 @@ def limit_to_channels(channel_ids: list, exempt_roles=None):
         return wrapper
     return decorator
 
+@tree.command(name="role", description="Add a role to a user.")
+async def role(interaction:discord.Interaction, user: discord.Member, *, role: str):
+    """Add a role to a user."""
+    allowed_roles = []
+    for user_role in interaction.user.roles:
+        if user_role.name in ALLOWED_ROLES_FOR_ROLES:
+            allowed_roles.extend(ALLOWED_ROLES_FOR_ROLES[user_role.name])
+    if role not in allowed_roles:
+        await interaction.response.send_message("You do not have permission to add this role.", ephemeral=True)
+        return
+    else:
+        target_role = discord.utils.get(interaction.guild.roles, name = role)
+        await user.add_roles(target_role)
+        await interaction.response.send_message(f"Added role {role} to {user.mention}.", ephemeral=False)
+        return
+        
     
+    
+
 
 def load_refs():
     print(f"Loading references from {BILL_REF_FILE}")
@@ -360,6 +379,8 @@ async def bill_keyboard_search(interaction: discord.Interaction, search_query: s
         print(f"Error in bill_keyboard_search: {e}")
         await interaction.followup.send(f"Error in response: {e}", ephemeral=True)
 
+
+
 @tree.command(name="add_bill", description="Add a bill to the legislative corpus.")
 @has_any_role("Admin")
 @limit_to_channels([1327483297202176080])
@@ -430,6 +451,16 @@ async def on_message(message):
         if message.channel == client.get_channel(SIGN_CHANNEL_ID) and "docs.google.com" in message.content:
             link = message.jump_url
             await RECORDS_CHANNEL.send(f'<@&1269061253964238919>, a new bill has been signed! {link}')
+            match = re.search(r"https?://docs\.google\.com/\S+", message.content)
+            if match:
+                doc_link = match.group(0)
+                print(f"Found Google Doc link: {doc_link}")  
+                try:
+                    add_bill_to_db(doc_link, "bills")
+                    print("Bill added to database.")
+                except Exception as e:
+                    print(f"Error adding bill to database: {e}")
+                    await RECORDS_CHANNEL.send(f"Error adding bill to database: {e}")   
     except Exception as e:
         traceback.print_exc()
         print(f"Exception in on_message: {e}")
