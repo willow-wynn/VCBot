@@ -113,19 +113,23 @@ def limit_to_channels(channel_ids: list, exempt_roles="Admin"):
 
 @tree.command(name="role", description="Add a role to a user.")
 async def role(interaction:discord.Interaction, user: discord.Member, *, role: str):
-    """Add a role to a user."""
+    """Add a role to a user. Start role with - to remove role."""
+    remove = role[0] == "-"
+    clean_role = role.removeprefix("-")
     allowed_roles = []
+    target_role = discord.utils.get(interaction.guild.roles, name = clean_role)
     for user_role in interaction.user.roles:
         if user_role.name in ALLOWED_ROLES_FOR_ROLES:
             allowed_roles.extend(ALLOWED_ROLES_FOR_ROLES[user_role.name])
-    if role not in allowed_roles:
+    if clean_role not in allowed_roles:
         await interaction.response.send_message("You do not have permission to add this role.", ephemeral=True)
         return
+    elif remove:
+        await user.remove_roles(target_role)
     else:
-        target_role = discord.utils.get(interaction.guild.roles, name = role)
         await user.add_roles(target_role)
-        await interaction.response.send_message(f"Added role {role} to {user.mention}.", ephemeral=False)
-        return
+    await interaction.response.send_message(f"{'Removed' if remove else 'Added'} role {clean_role} {'from' if remove else 'to'} {user.mention}.", ephemeral=False)
+
         
     
     
