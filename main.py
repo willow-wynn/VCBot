@@ -114,24 +114,59 @@ def limit_to_channels(channel_ids: list, exempt_roles="Admin"):
         return wrapper
     return decorator
 
-@tree.command(name="role", description="Add a role to a user.")
-async def role(interaction:discord.Interaction, user: discord.Member, *, role: str):
-    """Add a role to a user. Start role with - to remove role."""
+@tree.command(name="role", description="Add a role to one or more users.")
+async def role(interaction: discord.Interaction, users: str, *, role: str):
+    """add or remove `role` for arbitrary many members.  
+    usage: /role @member1 @member2 ... SomeRole   (prefix role with '-' to remove)"""
     remove = role[0] == "-"
     clean_role = role.removeprefix("-")
-    allowed_roles = []
-    target_role = discord.utils.get(interaction.guild.roles, name = clean_role)
-    for user_role in interaction.user.roles:
-        if user_role.name in ALLOWED_ROLES_FOR_ROLES:
-            allowed_roles.extend(ALLOWED_ROLES_FOR_ROLES[user_role.name])
+
+    # permission check – which roles is the invoker allowed to (un)assign?
+    allowed_roles: list[str] = []
+    for r in interaction.user.roles:
+        if r.name in ALLOWED_ROLES_FOR_ROLES:
+            allowed_roles.extend(ALLOWED_ROLES_FOR_ROLES[r.name])
+
     if clean_role not in allowed_roles:
-        await interaction.response.send_message("You do not have permission to add this role.", ephemeral=True)
+        await interaction.response.send_message(
+            "you do not have permission to add this role.", ephemeral=True
+        )
         return
-    elif remove:
-        await user.remove_roles(target_role)
-    else:
-        await user.add_roles(target_role)
-    await interaction.response.send_message(f"{'Removed' if remove else 'Added'} role {clean_role} {'from' if remove else 'to'} {user.mention}.", ephemeral=False)
+
+    target_role = discord.utils.get(interaction.guild.roles, name=clean_role)
+    if not target_role:
+        await interaction.response.send_message("specified role not found.", ephemeral=True)
+        return
+
+    # accept space/comma‑separated mentions or raw user ids
+    user_ids = re.findall(r"\d+", users)
+    if not user_ids:
+        await interaction.response.send_message("no valid users specified.", ephemeral=True)
+        return
+
+    # dedupe while preserving order
+    members: list[discord.Member] = []
+    for uid in dict.fromkeys(user_ids):
+        member = interaction.guild.get_member(int(uid))
+        if member:
+            members.append(member)
+
+    if not members:
+        await interaction.response.send_message("couldn't resolve any members.", ephemeral=True)
+        return
+
+    for m in members:
+        if remove:
+            await m.remove_roles(target_role)
+        else:
+            await m.add_roles(target_role)
+
+    mentions = ", ".join(m.mention for m in members)
+    await interaction.response.send_message(
+        f"{'Removed' if remove else 'Added'} role {clean_role} "
+        f"{'from' if remove else 'to'} {mentions}.",
+        ephemeral=False,
+    )
 role = role.callback
     
     
