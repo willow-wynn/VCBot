@@ -10,76 +10,31 @@ from vector_search import search_vectors_simple, load_search_model, model_path, 
 import pandas as pd
 import requests
 import re
+from registry import register_tool
 load_dotenv()
 GUILD_ID = int(os.getenv("GUILD"))
 
 
-call_local_files = {
-    "name": "call_knowledge",
-    "description": "calls a specific piece or pieces of information from your knowledge base.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "file_to_call": {
-                "type": "string",
-                "enum": ["rules", "constitution", "server_information", "house_rules", "senate_rules"],
-                "description": "which knowledge files to call",
-            },
-        },
-        "required": ["file_to_call"]
-    },
-}
-call_ctx_from_channel = {
-    "name": "call_other_channel_context",
-    "description": "calls information from another channel in the server",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "channel_to_call": {
-                "type": "string",
-                "enum": ["server-announcements", "twitter-rp", "official-rp-news", "virtual-congress-chat", "staff-announcements", "election-announcements", "house-floor", "senate-floor"],
-                "description": "which channel to call information from."
-            },
-            "number_of_messages_called": {
-                "type": "integer",
-                "description": "how many messages to return from the channel in question. Maximum 50. Request 10 unless otherwise specified."
-            },
-            "search_query": {
-                "type": "string",
-                "description": "what specific information to search for in the channel. will only return information that directly matches the search query. leave blank unless user explicitly asks for query."
-            },
-        },
-        "required": ["channel_to_call", "number_of_messages_called"]
-    }
-}
-
-call_bill_search = {
-    "name": "call_bill_search",
-    "description": "calls a simple RAG system for vector search through the legislative corpus",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "the question the user is asking about the legislation. this will be used to search through the corpus and will return the top result. phrasing the question as a question likely results in better outputs.",
-            },
-            "top_k": {
-                "type": "integer",
-                "description": "the number of results to return from the corpus. 5 is a good number for most queries. 10 is the maximum. Assign a value of 1 if the user is asking about a single specific bill.",
-            },
-            "reconstruct_bills_from_chunks": {
-                "type": "boolean",
-                "description": "whether or not to reconstruct the bills from the chunks returned. Use for discussion about specific bill. If the user is asking about a general topic, set to false with high top_k.",
-            },
-        },
-        "required": ["query", "top_k", "reconstruct_bills_from_chunks"] 
-    }
-}
-
-def call_knowledge(file_to_call):
+@register_tool
+def call_knowledge(file_to_call: str) -> str:
+    """
+    calls a specific piece or pieces of information from your knowledge base.
+    parameters:
+      file_to_call: which knowledge file to call. one of ["rules", "constitution", "server_information", "house_rules", "senate_rules"].
+    """
     with open(KNOWLEDGE_FILES[file_to_call], "r") as file:
         return file.read()
-async def call_other_channel_context(channel_name, number_of_messages_called, search_query=None):
+
+@register_tool
+async def call_other_channel_context(channel_name: str, number_of_messages_called: int, search_query: str = None):
+    """
+    calls information from another channel in the server.
+
+    parameters:
+      channel_name: which channel to call information from. one of ["server-announcements", "twitter-rp", "official-rp-news", "virtual-congress-chat", "staff-announcements", "election-announcements", "house-floor", "senate-floor"].
+      number_of_messages_called: how many messages to return from the channel in question. maximum 50. request 10 unless otherwise specified.
+      search_query: what specific information to search for in the channel. only returns information that directly matches the search query. leave blank unless user explicitly asks for query.
+    """
     GUILD = client.get_guild(GUILD_ID)
     try:
         channel_to_call = discord.utils.get(GUILD.text_channels, name=channel_name)
@@ -94,31 +49,15 @@ async def call_other_channel_context(channel_name, number_of_messages_called, se
     except Exception as e:
         print(f"cotc failed {e}")
 
-def search_bills(query: str, top_k: int, reconstruct_bills_from_chunks: bool):
+@register_tool
+def call_bill_search(query: str, top_k: int, reconstruct_bills_from_chunks: bool):
     """
-    Calls a simple RAG system for vector search through the legislative corpus.
+    calls a simple RAG system for vector search through the legislative corpus.
 
-    Implements the logic described in the tool definition, performing vector search
-    and optionally reconstructing bill text from retrieved chunks.
-
-    Args:
-        query: The search query string.
-        top_k: The number of chunk results desired. Max 10, Min 1.
-        reconstruct_bills_from_chunks: If True, attempts to reconstruct bill text
-                                        from the retrieved chunks, grouped by bill.
-                                        If False, returns the raw chunk results.
-
-    Returns:
-        If reconstruct_bills_from_chunks is True:
-            A list of dictionaries, each representing a bill with reconstructed text:
-            [{'source_bill': str, 'reconstructed_text': str, 'max_score': float, 'contributing_chunks': int}]
-            The text is reconstructed ONLY from the retrieved top_k chunks for that bill.
-        If reconstruct_bills_from_chunks is False:
-            A list of dictionaries, each representing a raw chunk result:
-            [{'score': float, 'metadata': dict, 'text': str}]
-        Returns an error dictionary {'error': str} if model loading or search fails significantly.
-        Returns an empty list [] if search completes but finds no relevant chunks.
-        You MUST include ALL args.
+    parameters:
+      query: the question the user is asking about the legislation. this will be used to search through the corpus and will return the top result. phrasing the question as a question likely results in better outputs.
+      top_k: the number of results to return from the corpus. 5 is a good number for most queries. 10 is the maximum. assign a value of 1 if the user is asking about a single specific bill.
+      reconstruct_bills_from_chunks: whether or not to reconstruct the bills from the chunks returned. use for discussion about specific bill. if the user is asking about a general topic, set to false with high top_k.
     """
     print(f"\n--- Running Bill Search ---")
     print(f"Query: '{query}'")
@@ -261,3 +200,23 @@ def bill_keyword_search(keyword: str):
 
 
     
+
+
+# --- Sanitization utilities (prevents unwanted mentions and unsafe filenames) ---
+def sanitize(text: str) -> str:
+    """
+    prevent accidental mass‑pings and unwanted role mentions.
+    breaks @everyone, @here, and role mentions (<@&ROLE_ID).
+    """
+    if text is None:
+        return text
+    return (
+        text.replace("@everyone", "@ everyone")
+            .replace("@here", "@ here")
+            .replace("<@&", "< @&")
+    )
+
+def sanitize_filename(name: str) -> str:
+    import re
+    name = re.sub(r'[^\w\s.-]', '', name)
+    return name.strip()

@@ -399,33 +399,40 @@ async def add_bill(interaction: discord.Interaction, bill_link: str, database_ty
         await interaction.followup.send(f"error adding bill: {e}", ephemeral=True)
 
 async def check_github_commits():
-    await client.wait_until_ready()
-    channel = client.get_channel(1327483297202176080)
-    with open ("last_commit.txt", "r") as f:
-        last_commit_sha = f.read().strip()
-    repo = "willow-wynn/VCBot"
-    github_api_url = f"https://api.github.com/repos/{repo}/commits"
-    github_url = "https://github.com/willow-wynn/VCBot"
-    async with aiohttp.ClientSession() as session:
-        while not client.is_closed():
-            try:
-                async with session.get(github_api_url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        latest_commit = data[0]
-                        sha = latest_commit['sha']
-                        with open("last_commit.txt", "w") as f:
-                            f.write(sha)
-                        if sha != last_commit_sha:
-                            commit_msg = latest_commit['commit']['message']
-                            commit_msg = sanitize(commit_msg)
-                            author = latest_commit['commit']['author']['name']
-                            await channel.send(f"New commit to {repo}:\n**{commit_msg}** by {author}. \n See it [here]({github_url}/commit/{sha})")
-                            last_commit_sha = sha
-            except Exception as e:
-                traceback.print_exc()
-                print(f"GitHub check failed: {e}")
-            await asyncio.sleep(60)  # check every 5 min
+    while True:
+        try:
+            await client.wait_until_ready()
+            channel = client.get_channel(1327483297202176080)
+            with open ("last_commit.txt", "r") as f:
+                last_commit_sha = f.read().strip()
+            repo = "willow-wynn/VCBot"
+            github_api_url = f"https://api.github.com/repos/{repo}/commits"
+            github_url = "https://github.com/willow-wynn/VCBot"
+            async with aiohttp.ClientSession() as session:
+                while not client.is_closed():
+                    try:
+                        async with session.get(github_api_url) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                latest_commit = data[0]
+                                sha = latest_commit['sha']
+                                with open("last_commit.txt", "w") as f:
+                                    f.write(sha)
+                                if sha != last_commit_sha:
+                                    commit_msg = latest_commit['commit']['message']
+                                    commit_msg = sanitize(commit_msg)
+                                    author = latest_commit['commit']['author']['name']
+                                    await channel.send(f"New commit to {repo}:\n**{commit_msg}** by {author}. \n See it [here]({github_url}/commit/{sha})")
+                                    last_commit_sha = sha
+                    except Exception as e:
+                        traceback.print_exc()
+                        print(f"GitHub check failed: {e}")
+                    await asyncio.sleep(60)  # check every 5 min
+            break  # only exit this while True if client is closed
+        except Exception as e:
+            print(f"github watcher crashed: {e}, retrying in 30s")
+            await asyncio.sleep(30)
+
 @client.event
 async def on_ready():
     print("on_ready: Starting up bot.")
@@ -469,4 +476,16 @@ async def on_message(message):
         traceback.print_exc()
         print(f"Exception in on_message: {e}")
         
-client.run(DISCORD_TOKEN)
+# --- Run discord client in a forever loop with restart on crash ---
+import time
+
+def run_bot_forever():
+    while True:
+        try:
+            client.run(DISCORD_TOKEN)
+        except Exception as e:
+            print(f"discord client crashed: {e}, retrying in 10s")
+            time.sleep(10)
+
+if __name__ == "__main__":
+    run_bot_forever()
