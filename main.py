@@ -11,6 +11,9 @@ import geminitools
 from functools import wraps
 from makeembeddings import embed_txt_file
 
+# --- Import TOOLS from registry at the top
+from registry import TOOLS
+
 # unified sanitization utility
 def sanitize(text: str) -> str:
     """
@@ -76,7 +79,7 @@ print(f"Loaded MAIN_CHAT_ID: {MAIN_CHAT_ID}")
 
 genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 print(f"Loaded GEMINI_API_KEY (hidden)")
-tools = types.Tool(function_declarations = [geminitools.call_ctx_from_channel, geminitools.call_local_files, geminitools.call_bill_search])
+tool_decl = list(TOOLS.values())
 
 BILL_REF_FILE = os.getenv("BILL_REF_FILE")
 print(f"Loaded BILL_REF_FILE: {BILL_REF_FILE}")
@@ -129,8 +132,7 @@ async def role(interaction:discord.Interaction, user: discord.Member, *, role: s
     else:
         await user.add_roles(target_role)
     await interaction.response.send_message(f"{'Removed' if remove else 'Added'} role {clean_role} {'from' if remove else 'to'} {user.mention}.", ephemeral=False)
-
-        
+role = role.callback
     
     
 
@@ -256,36 +258,21 @@ async def helper(interaction: discord.Interaction, query: str):
     try: 
         output = None
         await interaction.response.defer(ephemeral=False)
-        response = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=[tools], system_instruction=system_prompt), contents = context)
+        response = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=tool_decl, system_instruction=system_prompt), contents = context)
         print(f"Initial response: {response.text}")
         candidate = response.candidates[0]
+        # --- Tool dispatch block replaced by registry-based dynamic dispatch ---
         if candidate.content.parts[0].function_call:
             function_call = candidate.content.parts[0].function_call
             print(f"Function call detected: {function_call}")
-            if function_call.name == "call_knowledge":
-                output = geminitools.call_knowledge(function_call.args["file_to_call"])
-            elif function_call.name == "call_other_channel_context":
-                print("Calling call_other_channel_context with args:")
-                print(f"Channel: {function_call.args['channel_to_call']}")
-                print(f"Num Messages: {function_call.args['number_of_messages_called']}")
-                print(f"Search Query: {function_call.args.get('search_query')}")
-                raw_msgs = await geminitools.call_other_channel_context(
-                    function_call.args["channel_to_call"],
-                    function_call.args["number_of_messages_called"],
-                    function_call.args.get("search_query")
-                )
-                print(f"Retrieved {len(raw_msgs)} messages.")
-                output = "\n".join(f"{msg.author}: {msg.content}" for msg in raw_msgs)
-            elif function_call.name == "call_bill_search":
-                print("Calling search_bills with args:")
-                print(f"Channel: {function_call.args['query']}")
-                print(f"Num Messages: {function_call.args['top_k']}")
-                print(f"Search Query: {function_call.args.get('reconstruct_bills_from_chunks')}")
-                output = geminitools.search_bills(
-                    function_call.args["query"],
-                    function_call.args["top_k"],
-                    function_call.args.get("reconstruct_bills_from_chunks"),
-                )
+            fn = TOOLS.get(function_call.name)
+            if fn is None:
+                output = f"unknown tool: {function_call.name}"
+            else:
+                if asyncio.iscoroutinefunction(fn):
+                    output = await fn(**function_call.args)
+                else:
+                    output = fn(**function_call.args)
             new_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
                         Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
                         On a previous turn, you called tools. Now, your job is to respond to the user.
