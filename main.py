@@ -10,7 +10,30 @@ from config import KNOWLEDGE_FILES, BILL_TXT_STORAGE, BILL_DIRECTORIES, MODEL_PA
 import geminitools
 from functools import wraps
 from makeembeddings import embed_txt_file
+ # ---------- tool dispatch (generic) ----------
+def _tool_call_knowledge(**kw):
+     return geminitools.call_knowledge(kw["file_to_call"])
 
+async def _tool_call_other_channel_context(**kw):
+     raw = await geminitools.call_other_channel_context(
+         kw["channel_to_call"],
+         kw["number_of_messages_called"],
+         kw.get("search_query"),
+     )
+     return "\n".join(f"{m.author}: {m.content}" for m in raw)
+
+def _tool_call_bill_search(**kw):
+     return geminitools.search_bills(
+         kw["query"],
+         kw["top_k"],
+         kw.get("reconstruct_bills_from_chunks"),
+     )
+
+TOOLS = {
+     "call_knowledge": _tool_call_knowledge,
+     "call_other_channel_context": _tool_call_other_channel_context,
+     "call_bill_search": _tool_call_bill_search,
+ }
 # unified sanitization utility
 def sanitize(text: str) -> str:
     """
@@ -111,24 +134,60 @@ def limit_to_channels(channel_ids: list, exempt_roles="Admin"):
         return wrapper
     return decorator
 
-@tree.command(name="role", description="Add a role to a user.")
-async def role(interaction:discord.Interaction, user: discord.Member, *, role: str):
-    """Add a role to a user. Start role with - to remove role."""
+@tree.command(name="role", description="Add a role to one or more users.")
+async def role(interaction: discord.Interaction, users: str, *, role: str):
+    """add or remove `role` for arbitrary many members.  
+    usage: /role @member1 @member2 ... SomeRole   (prefix role with '-' to remove)"""
     remove = role[0] == "-"
     clean_role = role.removeprefix("-")
-    allowed_roles = []
-    target_role = discord.utils.get(interaction.guild.roles, name = clean_role)
-    for user_role in interaction.user.roles:
-        if user_role.name in ALLOWED_ROLES_FOR_ROLES:
-            allowed_roles.extend(ALLOWED_ROLES_FOR_ROLES[user_role.name])
+
+    # permission check – which roles is the invoker allowed to (un)assign?
+    allowed_roles: list[str] = []
+    for r in interaction.user.roles:
+        if r.name in ALLOWED_ROLES_FOR_ROLES:
+            allowed_roles.extend(ALLOWED_ROLES_FOR_ROLES[r.name])
+
     if clean_role not in allowed_roles:
-        await interaction.response.send_message("You do not have permission to add this role.", ephemeral=True)
+        await interaction.response.send_message(
+            "you do not have permission to add this role.", ephemeral=True
+        )
         return
-    elif remove:
-        await user.remove_roles(target_role)
-    else:
-        await user.add_roles(target_role)
-    await interaction.response.send_message(f"{'Removed' if remove else 'Added'} role {clean_role} {'from' if remove else 'to'} {user.mention}.", ephemeral=False)
+
+    target_role = discord.utils.get(interaction.guild.roles, name=clean_role)
+    if not target_role:
+        await interaction.response.send_message("specified role not found.", ephemeral=True)
+        return
+
+    # accept space/comma‑separated mentions or raw user ids
+    user_ids = re.findall(r"\d+", users)
+    if not user_ids:
+        await interaction.response.send_message("no valid users specified.", ephemeral=True)
+        return
+
+    # dedupe while preserving order
+    members: list[discord.Member] = []
+    for uid in dict.fromkeys(user_ids):
+        member = interaction.guild.get_member(int(uid))
+        if member:
+            members.append(member)
+
+    if not members:
+        await interaction.response.send_message("couldn't resolve any members.", ephemeral=True)
+        return
+
+    for m in members:
+        if remove:
+            await m.remove_roles(target_role)
+        else:
+            await m.add_roles(target_role)
+
+    mentions = ", ".join(m.mention for m in members)
+    await interaction.response.send_message(
+        f"{'Removed' if remove else 'Added'} role {clean_role} "
+        f"{'from' if remove else 'to'} {mentions}.",
+        ephemeral=False,
+    )
+role = role.callback
 
         
     
@@ -222,6 +281,7 @@ async def modifyref(interaction: discord.Interaction, num: int, type: str):
         traceback.print_exc()
         return
 
+
 @tree.command(name="helper", description="Query the VCBot helper.")
 @has_any_role("Admin", "AI Access")
 @limit_to_channels([1327483297202176080])
@@ -262,30 +322,16 @@ async def helper(interaction: discord.Interaction, query: str):
         if candidate.content.parts[0].function_call:
             function_call = candidate.content.parts[0].function_call
             print(f"Function call detected: {function_call}")
-            if function_call.name == "call_knowledge":
-                output = geminitools.call_knowledge(function_call.args["file_to_call"])
-            elif function_call.name == "call_other_channel_context":
-                print("Calling call_other_channel_context with args:")
-                print(f"Channel: {function_call.args['channel_to_call']}")
-                print(f"Num Messages: {function_call.args['number_of_messages_called']}")
-                print(f"Search Query: {function_call.args.get('search_query')}")
-                raw_msgs = await geminitools.call_other_channel_context(
-                    function_call.args["channel_to_call"],
-                    function_call.args["number_of_messages_called"],
-                    function_call.args.get("search_query")
-                )
-                print(f"Retrieved {len(raw_msgs)} messages.")
-                output = "\n".join(f"{msg.author}: {msg.content}" for msg in raw_msgs)
-            elif function_call.name == "call_bill_search":
-                print("Calling search_bills with args:")
-                print(f"Channel: {function_call.args['query']}")
-                print(f"Num Messages: {function_call.args['top_k']}")
-                print(f"Search Query: {function_call.args.get('reconstruct_bills_from_chunks')}")
-                output = geminitools.search_bills(
-                    function_call.args["query"],
-                    function_call.args["top_k"],
-                    function_call.args.get("reconstruct_bills_from_chunks"),
-                )
+            fn = TOOLS.get(function_call.name)
+            if fn is None:
+                print(f"unknown tool {function_call.name}")
+                output = None
+            else:
+                args = function_call.args or {}
+                if asyncio.iscoroutinefunction(fn):
+                    output = await fn(**args)
+                else:
+                    output = fn(**args)
             new_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
                         Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
                         On a previous turn, you called tools. Now, your job is to respond to the user.
