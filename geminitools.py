@@ -2,7 +2,7 @@ import os
 import discord
 import asyncio
 from botcore import intents, client, tree
-from config import KNOWLEDGE_FILES, BILL_TXT_STORAGE
+from config import KNOWLEDGE_FILES, BILL_DIRECTORIES
 from dotenv import load_dotenv
 import traceback
 from collections import defaultdict
@@ -252,8 +252,8 @@ def fetch_public_gdoc_text(gdoc_url):
     return resp.text
 def bill_keyword_search(keyword: str):
     bill_data = [
-        {"filename": name, "text": open(os.path.join(BILL_TXT_STORAGE, name), "r").read()}
-        for name in os.listdir(BILL_TXT_STORAGE)
+        {"filename": name, "text": open(os.path.join(BILL_DIRECTORIES["bills"], name), "r").read()}
+        for name in os.listdir(BILL_DIRECTORIES["bills"])
     ]
     df = pd.DataFrame(bill_data)
     mask = df["text"].str.contains(keyword, na=False, case=False)

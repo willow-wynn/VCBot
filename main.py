@@ -71,6 +71,26 @@ async def add_bill_to_db(bill_link: str, database_type: Literal["bills"]) -> str
     bill_location = os.path.join(bill_dir, bill_name)
     with open(bill_location, "w", encoding="utf-8") as f:
         f.write(bill_text)
+    # --- download PDF version of the bill ---
+    try:
+        # extract the google doc id and build the pdf export url
+        file_id_match = re.search(r"/document/d/([a-zA-Z0-9-_]+)", bill_link)
+        if file_id_match:
+            file_id = file_id_match.group(1)
+            pdf_url = f"https://docs.google.com/document/d/{file_id}/export?format=pdf"
+            resp_pdf = requests.get(pdf_url)
+            if resp_pdf.status_code == 200:
+                pdf_name = bill_name[:-4] + ".pdf" if bill_name.lower().endswith(".txt") else bill_name + ".pdf"
+                pdf_dir = BILL_DIRECTORIES.get("billpdfs")
+                os.makedirs(pdf_dir, exist_ok=True)
+                pdf_path = os.path.join(pdf_dir, pdf_name)
+                with open(pdf_path, "wb") as pdf_file:
+                    pdf_file.write(resp_pdf.content)
+                print(f"Added PDF to {pdf_path}")
+            else:
+                print(f"failed to fetch pdf: status {resp_pdf.status_code}")
+    except Exception as e:
+        print(f"error downloading pdf copy: {e}")
     embed_txt_file(txt_path = bill_location, model_path = MODEL_PATH, chunk_size_tokens = 1024, overlap_tokens = 50, save_to = VECTOR_PKL)
     print(f"Added bill to pickle") 
     return bill_location  # can use this to send file, log, etc.
@@ -407,10 +427,10 @@ async def model_economic_impact(interaction: discord.Interaction, bill_link: str
         print(f"Error generating economic impact report: {e}")
         await interaction.followup.send(f"Error generating content: {e}", ephemeral=True)
         return
-@tree.command(name="bill_keyboard_search", description="Perform a basic keyword search on the legislative corpus.")
+@tree.command(name="bill_keyword_search", description="Perform a basic keyword search on the legislative corpus.")
 @has_any_role("Admin", "AI Access")
 @limit_to_channels([1327483297202176080])
-async def bill_keyboard_search(interaction: discord.Interaction, search_query: str):
+async def bill_keyword_search(interaction: discord.Interaction, search_query: str):
     """Perform a basic keyword search on the legislative corpus."""
     returned_bills = geminitools.bill_keyword_search(search_query)
     try:
@@ -418,9 +438,7 @@ async def bill_keyboard_search(interaction: discord.Interaction, search_query: s
         for _, row in returned_bills.iterrows():
             name = row["filename"]
             content = row["text"]
-            with open(name, "w", encoding="utf-8") as f:
-                f.write(content)
-            await interaction.channel.send(file=discord.File(name))
+            await interaction.channel.send(file=discord.File(os.path.join(BILL_DIRECTORIES["billpdfs"], name)))
             os.remove(name)
         await interaction.followup.send(f"Complete. Found {len(returned_bills)} bills matching your query.", ephemeral=True)
         
