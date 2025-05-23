@@ -6,10 +6,18 @@ import aiohttp, re, asyncio, os, json, csv, traceback, datetime, requests
 from dotenv import load_dotenv
 from typing import Literal
 from botcore import intents, client, tree
-from config import KNOWLEDGE_FILES, BILL_TXT_STORAGE, BILL_DIRECTORIES, MODEL_PATH, VECTOR_PKL, ALLOWED_ROLES_FOR_ROLES
+from config import KNOWLEDGE_FILES, BILL_DIRECTORIES, MODEL_PATH, VECTOR_PKL, ALLOWED_ROLES_FOR_ROLES
 import geminitools
 from functools import wraps
 from makeembeddings import embed_txt_file
+from pydantic import BaseModel
+
+# Pydantic model for bill reference response schema
+class BillReferenceResponse(BaseModel):
+    is_reference: bool
+    bill_type: str = ""
+    reference_number: int = 0
+
  # ---------- tool dispatch (generic) ----------
 def _tool_call_knowledge(**kw):
      return geminitools.call_knowledge(kw["file_to_call"])
@@ -236,18 +244,22 @@ async def update_bill_reference(message):
         response = genai_client.models.generate_content(
             model="gemini-2.0-flash-thinking-exp",
             config=types.GenerateContentConfig(
-                system_instruction="""You are a helper for the Virtual Congress Discord server. Your goal is to determine whether or not the current message contains a bill reference. 
-        You are to output only in valid JSON. The output you produce will be passed directly to json.loads, so ensure your output consists only of valid JSON without whitespace.
-        Use this JSON schema:" 
-        {'is_reference': bool, 'bill_type':str, 'reference_number':int}
-        is_refere nce - Is the bill being referenced? If the message in question IS NOT PROVIDING A REFERENCE to the bill, return False else return True
-        bill_type - hr, hres, hjres, hconres
-        reference_number - the number the bill is assigned.
-        """
+                response_mime_type="application/json",
+                response_schema=BillReferenceResponse,
+                system_instruction="""You are a helper for the Virtual Congress Discord server. Your goal is to determine whether or not the current message contains a bill reference.
+
+                Analyze the message and determine:
+                - is_reference: True if the message contains a bill reference (like H.R.123, H.RES.45, etc.), False otherwise
+                - bill_type: If it's a reference, extract the bill type (hr, hres, hjres, hconres). Leave empty string if not a reference.
+                - reference_number: If it's a reference, extract the bill number. Use 0 if not a reference.
+                
+                Examples of bill references: H.R.123, H.RES.45, H.J.RES.12, H.CON.RES.8, **H.C.REP.4**
+                """
             ),
             contents=text,
         )
 
+        # Parse the structured JSON response
         respdict = json.loads(response.text)
         print(f"Parsed JSON: {respdict}")
 
@@ -257,17 +269,27 @@ async def update_bill_reference(message):
         bill_type = respdict["bill_type"].lower().strip()
         reference_number = respdict["reference_number"]
 
+        # Validate we have required fields
+        if not bill_type or reference_number <= 0:
+            print(f"Invalid bill reference data: type='{bill_type}', number={reference_number}")
+            return "Invalid reference format!"
+
         refs = load_refs()
         current = refs.get(bill_type, 0)
         refs[bill_type] = max(current, reference_number)  # don't go backward
         save_refs(refs)
 
         print(f"Updated {bill_type.upper()} to {refs[bill_type]}")
+        return f"Updated {bill_type.upper()} to {refs[bill_type]}"
+        
+    except json.JSONDecodeError as e:
+        print(f"JSON decode error: {e}")
+        print(f"Raw response: {response.text if 'response' in locals() else 'No response'}")
+        return "Failed to parse response"
     except Exception as e:
         traceback.print_exc()
         print(f"Exception in update_bill_reference: {e}")
-        print(f"JSON parse failed: {e}")
-        return "Error"
+        return f"Error processing message: {e}"
 
 @tree.command(name="reference", description="reference a bill")
 @has_any_role("Admin", "Representative", "House Clerk", "Moderator")
