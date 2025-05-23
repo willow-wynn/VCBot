@@ -4,10 +4,10 @@ from sentence_transformers import SentenceTransformer, util
 import torch
 import traceback
 import os
-import config
+from settings import settings, MODEL_PATH, VECTOR_PKL
 
-model_path = config.MODEL_PATH
-vector_pkl = "/Users/wynndiaz/VCBot/vectors.pkl"
+model_path = MODEL_PATH
+vector_pkl = VECTOR_PKL
 _MODEL = None
 def load_search_model(model_path):
     """Loads the SentenceTransformer model (lazily)."""

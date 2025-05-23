@@ -6,7 +6,7 @@ import aiohttp, re, asyncio, os, json, csv, traceback, datetime, requests
 from dotenv import load_dotenv
 from typing import Literal
 from botcore import intents, client, tree
-from config import KNOWLEDGE_FILES, BILL_DIRECTORIES, MODEL_PATH, VECTOR_PKL, ALLOWED_ROLES_FOR_ROLES
+from settings import settings, KNOWLEDGE_FILES, BILL_DIRECTORIES, MODEL_PATH, VECTOR_PKL, ALLOWED_ROLES_FOR_ROLES
 import geminitools
 from functools import wraps
 from makeembeddings import embed_txt_file
@@ -15,33 +15,40 @@ from pydantic import BaseModel
 # Pydantic model for bill reference response schema
 class BillReferenceResponse(BaseModel):
     is_reference: bool
-    bill_type: str = ""
-    reference_number: int = 0
+    bill_type: str
+    reference_number: int
 
  # ---------- tool dispatch (generic) ----------
-def _tool_call_knowledge(**kw):
-     return geminitools.call_knowledge(kw["file_to_call"])
+def create_tools(discord_client):
+    """Factory function to create tools with client in closure"""
+    
+    def _tool_call_knowledge(**kw):
+        return geminitools.call_knowledge(kw["file_to_call"])
 
-async def _tool_call_other_channel_context(**kw):
-     raw = await geminitools.call_other_channel_context(
-         kw["channel_to_call"],
-         kw["number_of_messages_called"],
-         kw.get("search_query"),
-     )
-     return "\n".join(f"{m.author}: {m.content}" for m in raw)
+    async def _tool_call_other_channel_context(**kw):
+        raw = await geminitools.call_other_channel_context(
+            kw["channel_to_call"],
+            kw["number_of_messages_called"],
+            kw.get("search_query"),
+            client=discord_client  # Pass the client from closure
+        )
+        return "\n".join(f"{m.author}: {m.content}" for m in raw)
 
-def _tool_call_bill_search(**kw):
-     return geminitools.search_bills(
-         kw["query"],
-         kw["top_k"],
-         kw.get("reconstruct_bills_from_chunks"),
-     )
+    def _tool_call_bill_search(**kw):
+        return geminitools.search_bills(
+            kw["query"],
+            kw["top_k"],
+            kw.get("reconstruct_bills_from_chunks"),
+        )
 
-TOOLS = {
-     "call_knowledge": _tool_call_knowledge,
-     "call_other_channel_context": _tool_call_other_channel_context,
-     "call_bill_search": _tool_call_bill_search,
- }
+    return {
+        "call_knowledge": _tool_call_knowledge,
+        "call_other_channel_context": _tool_call_other_channel_context,
+        "call_bill_search": _tool_call_bill_search,
+    }
+
+# TOOLS will be initialized in on_ready after client is available
+TOOLS = None
 # unified sanitization utility
 def sanitize(text: str) -> str:
     """
@@ -103,37 +110,32 @@ async def add_bill_to_db(bill_link: str, database_type: Literal["bills"]) -> str
     print(f"Added bill to pickle") 
     return bill_location  # can use this to send file, log, etc.
 
-def traced_load_dotenv():
-    print("Loading environment variables from .env")
-    load_dotenv()
-    print("Loaded environment variables from .env")
-
-traced_load_dotenv()
-
-BOT_ID = int(os.getenv("BOT_ID"))
+# Load configuration from settings
+print("Loading configuration from settings module...")
+BOT_ID = settings.bot_id
 print(f"Loaded BOT_ID: {BOT_ID}")
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-print(f"Loaded DISCORD_TOKEN: {DISCORD_TOKEN}")
-RECORDS_CHANNEL_ID = int(os.getenv("RECORDS_CHANNEL"))
+DISCORD_TOKEN = settings.discord_token
+print(f"Loaded DISCORD_TOKEN: (hidden)")
+RECORDS_CHANNEL_ID = settings.channels.records_channel
 print(f"Loaded RECORDS_CHANNEL_ID: {RECORDS_CHANNEL_ID}")
-NEWS_CHANNEL_ID = int(os.getenv("NEWS_CHANNEL"))
+NEWS_CHANNEL_ID = settings.channels.news_channel
 print(f"Loaded NEWS_CHANNEL_ID: {NEWS_CHANNEL_ID}")
-SIGN_CHANNEL_ID = int(os.getenv("SIGN_CHANNEL"))
+SIGN_CHANNEL_ID = settings.channels.sign_channel
 print(f"Loaded SIGN_CHANNEL_ID: {SIGN_CHANNEL_ID}")
-CLERK_CHANNEL_ID = int(os.getenv("CLERK_CHANNEL"))
+CLERK_CHANNEL_ID = settings.channels.clerk_channel
 print(f"Loaded CLERK_CHANNEL_ID: {CLERK_CHANNEL_ID}")
-MAIN_CHAT_ID = 654467992272371712
+MAIN_CHAT_ID = settings.channels.main_chat
 print(f"Loaded MAIN_CHAT_ID: {MAIN_CHAT_ID}")
 
-genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+genai_client = genai.Client(api_key=settings.gemini_api_key)
 print(f"Loaded GEMINI_API_KEY (hidden)")
 tools = types.Tool(function_declarations = [geminitools.call_ctx_from_channel, geminitools.call_local_files, geminitools.call_bill_search])
 
-BILL_REF_FILE = os.getenv("BILL_REF_FILE")
+BILL_REF_FILE = str(settings.file_storage.bill_ref_file)
 print(f"Loaded BILL_REF_FILE: {BILL_REF_FILE}")
-NEWS_FILE = os.getenv("NEWS_FILE")
+NEWS_FILE = str(settings.file_storage.news_file)
 print(f"Loaded NEWS_FILE: {NEWS_FILE}")
-QUERIES_FILE = os.getenv("QUERIES_FILE")
+QUERIES_FILE = str(settings.file_storage.queries_file)
 print(f"Loaded QUERIES_FILE: {QUERIES_FILE}")
 
 def has_any_role(*role_names):
@@ -250,8 +252,10 @@ async def update_bill_reference(message):
 
                 Analyze the message and determine:
                 - is_reference: True if the message contains a bill reference (like H.R.123, H.RES.45, etc.), False otherwise
-                - bill_type: If it's a reference, extract the bill type (hr, hres, hjres, hconres). Leave empty string if not a reference.
-                - reference_number: If it's a reference, extract the bill number. Use 0 if not a reference.
+                - bill_type: If it's a reference, extract the bill type (hr, hres, hjres, hconres). If not a reference, use empty string "".
+                - reference_number: If it's a reference, extract the bill number. If not a reference, use 0.
+                
+                You MUST provide all three fields in your response. Never omit any field.
                 
                 Examples of bill references: H.R.123, H.RES.45, H.J.RES.12, H.CON.RES.8, **H.C.REP.4**
                 """
@@ -302,7 +306,7 @@ async def reference(interaction: discord.Interaction, link: str, type: Literal["
         refs[type] = next_val
         save_refs(refs)
         await interaction.response.send_message(f"The bill {link} has been referenced successfully as {type.upper()} {next_val}.", ephemeral=True)
-        clerkchannel = client.get_channel(1037456401708105780)
+        clerkchannel = client.get_channel(settings.channels.clerk_announce_channel)
         await clerkchannel.send(f'Bill {link} assigned reference {type.upper()} {next_val}')
         return
     except Exception as e:
@@ -326,7 +330,7 @@ async def modifyref(interaction: discord.Interaction, num: int, type: str):
 
 @tree.command(name="helper", description="Query the VCBot helper.")
 @has_any_role("Admin", "AI Access")
-@limit_to_channels([1327483297202176080])
+@limit_to_channels([settings.channels.bot_helper_channel])
 async def helper(interaction: discord.Interaction, query: str):
     print(f"Executing command: helper by {interaction.user.display_name}")
     # context constructor
@@ -364,16 +368,20 @@ async def helper(interaction: discord.Interaction, query: str):
         if candidate.content.parts[0].function_call:
             function_call = candidate.content.parts[0].function_call
             print(f"Function call detected: {function_call}")
-            fn = TOOLS.get(function_call.name)
-            if fn is None:
-                print(f"unknown tool {function_call.name}")
+            if TOOLS is None:
+                print("ERROR: TOOLS not initialized yet")
                 output = None
             else:
-                args = function_call.args or {}
-                if asyncio.iscoroutinefunction(fn):
-                    output = await fn(**args)
+                fn = TOOLS.get(function_call.name)
+                if fn is None:
+                    print(f"unknown tool {function_call.name}")
+                    output = None
                 else:
-                    output = fn(**args)
+                    args = function_call.args or {}
+                    if asyncio.iscoroutinefunction(fn):
+                        output = await fn(**args)
+                    else:
+                        output = fn(**args)
             new_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
                         Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
                         On a previous turn, you called tools. Now, your job is to respond to the user.
@@ -410,7 +418,7 @@ async def helper(interaction: discord.Interaction, query: str):
     return
 @tree.command(name="econ_impact_report", description="Get a detailed economic impact report on a given piece of legislation.")
 @has_any_role("Admin", "Events Team")
-@limit_to_channels([1327483297202176080])
+@limit_to_channels([settings.channels.bot_helper_channel])
 async def model_economic_impact(interaction: discord.Interaction, bill_link: str, additional_context: str = None):
     """Provided a bill, generates an economic impact statement that indicates how such a bill would impact the economy.
     """
@@ -451,7 +459,7 @@ async def model_economic_impact(interaction: discord.Interaction, bill_link: str
         return
 @tree.command(name="bill_keyword_search", description="Perform a basic keyword search on the legislative corpus.")
 @has_any_role("Admin", "AI Access")
-@limit_to_channels([1327483297202176080])
+@limit_to_channels([settings.channels.bot_helper_channel])
 async def bill_keyword_search(interaction: discord.Interaction, search_query: str):
     """Perform a basic keyword search on the legislative corpus."""
     returned_bills = geminitools.bill_keyword_search(search_query)
@@ -473,7 +481,7 @@ async def bill_keyword_search(interaction: discord.Interaction, search_query: st
 
 @tree.command(name="add_bill", description="Add a bill to the legislative corpus.")
 @has_any_role("Admin")
-@limit_to_channels([1327483297202176080])
+@limit_to_channels([settings.channels.bot_helper_channel])
 async def add_bill(interaction: discord.Interaction, bill_link: str, database_type: Literal["bills"] = "bills"):
     await interaction.response.defer(ephemeral=False)
     try:
@@ -486,7 +494,7 @@ async def add_bill(interaction: discord.Interaction, bill_link: str, database_ty
 
 async def check_github_commits():
     await client.wait_until_ready()
-    channel = client.get_channel(1327483297202176080)
+    channel = client.get_channel(settings.channels.bot_helper_channel)
     with open ("last_commit.txt", "r") as f:
         last_commit_sha = f.read().strip()
     repo = "willow-wynn/VCBot"
@@ -516,7 +524,12 @@ async def check_github_commits():
 async def on_ready():
     print("on_ready: Starting up bot.")
     print(f"Logged in as {client.user}")
-    global RECORDS_CHANNEL, NEWS_CHANNEL, SIGN_CHANNEL, CLERK_CHANNEL
+    global RECORDS_CHANNEL, NEWS_CHANNEL, SIGN_CHANNEL, CLERK_CHANNEL, TOOLS
+    
+    # Initialize TOOLS with the client
+    TOOLS = create_tools(client)
+    print("Initialized tool system with Discord client")
+    
     RECORDS_CHANNEL = client.get_channel(RECORDS_CHANNEL_ID)
     NEWS_CHANNEL = client.get_channel(NEWS_CHANNEL_ID)
     SIGN_CHANNEL = client.get_channel(SIGN_CHANNEL_ID)

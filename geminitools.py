@@ -1,8 +1,7 @@
 import os
 import discord
 import asyncio
-from botcore import intents, client, tree
-from config import KNOWLEDGE_FILES, BILL_DIRECTORIES
+from settings import settings, KNOWLEDGE_FILES, BILL_DIRECTORIES
 from dotenv import load_dotenv
 import traceback
 from collections import defaultdict
@@ -10,8 +9,8 @@ from vector_search import search_vectors_simple, load_search_model, model_path, 
 import pandas as pd
 import requests
 import re
-load_dotenv()
-GUILD_ID = int(os.getenv("GUILD"))
+# Guild ID from settings
+GUILD_ID = settings.guild_id
 
 
 call_local_files = {
@@ -79,7 +78,9 @@ call_bill_search = {
 def call_knowledge(file_to_call):
     with open(KNOWLEDGE_FILES[file_to_call], "r") as file:
         return file.read()
-async def call_other_channel_context(channel_name, number_of_messages_called, search_query=None):
+async def call_other_channel_context(channel_name, number_of_messages_called, search_query=None, client=None):
+    if client is None:
+        raise ValueError("Discord client must be provided")
     GUILD = client.get_guild(GUILD_ID)
     try:
         channel_to_call = discord.utils.get(GUILD.text_channels, name=channel_name)
