@@ -5,18 +5,31 @@ from discord import app_commands
 import aiohttp, re, asyncio, os, json, csv, traceback, datetime, requests
 from dotenv import load_dotenv
 from typing import Literal
+from pathlib import Path
 from botcore import intents, client, tree
 from settings import settings, KNOWLEDGE_FILES, BILL_DIRECTORIES, MODEL_PATH, VECTOR_PKL, ALLOWED_ROLES_FOR_ROLES
 import geminitools
 from functools import wraps
 from makeembeddings import embed_txt_file
 from pydantic import BaseModel
+from bot_state import BotState
+from command_utils import (
+    build_channel_context, sanitize, chunk_text, 
+    send_ai_response, handle_command_error
+)
+from response_formatter import ResponseFormatter
+from error_handler import handle_errors, mark_uses_network, mark_uses_ai
+import tools  # Import tools to register them with the registry
+from registry import registry
+from exceptions import (
+    VCBotError, ConfigurationError, BillProcessingError, AIServiceError,
+    PermissionError as VCBotPermissionError, ToolExecutionError, DiscordAPIError,
+    RateLimitError, ParseError, NetworkError, TimeoutError as VCBotTimeoutError
+)
+from logging_config import setup_logging, logger
+from constants import Roles, Limits, Messages
 
-# Pydantic model for bill reference response schema
-class BillReferenceResponse(BaseModel):
-    is_reference: bool
-    bill_type: str
-    reference_number: int
+# Pydantic models moved to services
 
  # ---------- tool dispatch (generic) ----------
 def create_tools(discord_client):
@@ -37,8 +50,7 @@ def create_tools(discord_client):
     def _tool_call_bill_search(**kw):
         return geminitools.search_bills(
             kw["query"],
-            kw["top_k"],
-            kw.get("reconstruct_bills_from_chunks"),
+            kw["top_k"]
         )
 
     return {
@@ -47,124 +59,42 @@ def create_tools(discord_client):
         "call_bill_search": _tool_call_bill_search,
     }
 
-# TOOLS will be initialized in on_ready after client is available
-TOOLS = None
-# unified sanitization utility
-def sanitize(text: str) -> str:
-    """
-    prevent accidental mass‑pings and unwanted role mentions.
-    breaks @everyone, @here, and role mentions (<@&ROLE_ID).
-    """
-    if text is None:
-        return text
-    return (
-        text.replace("@everyone", "@ everyone")
-            .replace("@here", "@ here")
-            .replace("<@&", "< @&")
-    )
-def sanitize_filename(name: str) -> str:
-    name = re.sub(r'[^\w\s.-]', '', name)
-    return name.strip()
+# Tool functions will be stored in bot_state
+# Sanitize function moved to command_utils
+# Bill management functions moved to BillService
 
-async def add_bill_to_db(bill_link: str, database_type: Literal["bills"]) -> str:
-    bill_text = geminitools.fetch_public_gdoc_text(bill_link)
-    if not bill_text.strip():
-        raise ValueError("empty bill text")
-
-    resp = genai_client.models.generate_content(
-        model="gemini-2.0-flash-exp",
-        config=types.GenerateContentConfig(
-            system_instruction="Generate a filename for the bill. The filename should be in the format of 'Bill Title.txt'. The title should be a short description of the bill."
-        ),
-        contents=[types.Content(role='user', parts=[types.Part.from_text(text=bill_text)])]
-    )
-    bill_name = sanitize_filename(resp.text)
-    if not bill_name.lower().endswith(".txt"):
-        bill_name += ".txt"
-
-    bill_dir = BILL_DIRECTORIES[database_type]
-    bill_location = os.path.join(bill_dir, bill_name)
-    with open(bill_location, "w", encoding="utf-8") as f:
-        f.write(bill_text)
-    # --- download PDF version of the bill ---
-    try:
-        # extract the google doc id and build the pdf export url
-        file_id_match = re.search(r"/document/d/([a-zA-Z0-9-_]+)", bill_link)
-        if file_id_match:
-            file_id = file_id_match.group(1)
-            pdf_url = f"https://docs.google.com/document/d/{file_id}/export?format=pdf"
-            resp_pdf = requests.get(pdf_url)
-            if resp_pdf.status_code == 200:
-                pdf_name = bill_name[:-4] + ".pdf" if bill_name.lower().endswith(".txt") else bill_name + ".pdf"
-                pdf_dir = BILL_DIRECTORIES.get("billpdfs")
-                os.makedirs(pdf_dir, exist_ok=True)
-                pdf_path = os.path.join(pdf_dir, pdf_name)
-                with open(pdf_path, "wb") as pdf_file:
-                    pdf_file.write(resp_pdf.content)
-                print(f"Added PDF to {pdf_path}")
-            else:
-                print(f"failed to fetch pdf: status {resp_pdf.status_code}")
-    except Exception as e:
-        print(f"error downloading pdf copy: {e}")
-    embed_txt_file(txt_path = bill_location, model_path = MODEL_PATH, chunk_size_tokens = 1024, overlap_tokens = 50, save_to = VECTOR_PKL)
-    print(f"Added bill to pickle") 
-    return bill_location  # can use this to send file, log, etc.
-
-# Load configuration from settings
-print("Loading configuration from settings module...")
-BOT_ID = settings.bot_id
-print(f"Loaded BOT_ID: {BOT_ID}")
-DISCORD_TOKEN = settings.discord_token
-print(f"Loaded DISCORD_TOKEN: (hidden)")
-RECORDS_CHANNEL_ID = settings.channels.records_channel
-print(f"Loaded RECORDS_CHANNEL_ID: {RECORDS_CHANNEL_ID}")
-NEWS_CHANNEL_ID = settings.channels.news_channel
-print(f"Loaded NEWS_CHANNEL_ID: {NEWS_CHANNEL_ID}")
-SIGN_CHANNEL_ID = settings.channels.sign_channel
-print(f"Loaded SIGN_CHANNEL_ID: {SIGN_CHANNEL_ID}")
-CLERK_CHANNEL_ID = settings.channels.clerk_channel
-print(f"Loaded CLERK_CHANNEL_ID: {CLERK_CHANNEL_ID}")
-MAIN_CHAT_ID = settings.channels.main_chat
-print(f"Loaded MAIN_CHAT_ID: {MAIN_CHAT_ID}")
-
-genai_client = genai.Client(api_key=settings.gemini_api_key)
-print(f"Loaded GEMINI_API_KEY (hidden)")
-tools = types.Tool(function_declarations = [geminitools.call_ctx_from_channel, geminitools.call_local_files, geminitools.call_bill_search])
-
-BILL_REF_FILE = str(settings.file_storage.bill_ref_file)
-print(f"Loaded BILL_REF_FILE: {BILL_REF_FILE}")
-NEWS_FILE = str(settings.file_storage.news_file)
-print(f"Loaded NEWS_FILE: {NEWS_FILE}")
-QUERIES_FILE = str(settings.file_storage.queries_file)
-print(f"Loaded QUERIES_FILE: {QUERIES_FILE}")
+# Initialize bot state (will be fully configured in on_ready)
+logger.info("Loading configuration from settings module...")
+bot_state = None  # Will be initialized in on_ready
 
 def has_any_role(*role_names):
     def decorator(func):
         @wraps(func)
         async def wrapper(interaction: discord.Interaction, *args, **kwargs):
-            print(f"Checking roles for {interaction.user.display_name}: {[role.name for role in interaction.user.roles]}")
+            logger.debug(f"Checking roles for {interaction.user.display_name}: {[role.name for role in interaction.user.roles]}")
             if not any(role.name in role_names for role in interaction.user.roles):
-                await interaction.response.send_message("You do not have permission to use this command. Get the AI Access role from the pins.", ephemeral=True)
+                await interaction.response.send_message(Messages.PERMISSION_DENIED_AI_ACCESS, ephemeral=True)
                 return
             return await func(interaction, *args, **kwargs)
         return wrapper
     return decorator
 
-def limit_to_channels(channel_ids: list, exempt_roles="Admin"):
+def limit_to_channels(channel_ids: list, exempt_roles=[Roles.ADMIN]):
     def decorator(func):
         @wraps(func)
         async def wrapper(interaction: discord.Interaction, *args, **kwargs):
-            print(f"Checking if {interaction.user.display_name} can use command in {interaction.channel.id}")
+            logger.debug(f"Checking if {interaction.user.display_name} can use command in {interaction.channel.id}")
             if exempt_roles and any(role.name in exempt_roles for role in interaction.user.roles):
                 return await func(interaction, *args, **kwargs)
             if interaction.channel.id not in channel_ids:
-                await interaction.response.send_message("This command can only be used in specific channels.", ephemeral=True)
+                await interaction.response.send_message(Messages.CHANNEL_RESTRICTED, ephemeral=True)
                 return
             return await func(interaction, *args, **kwargs)
         return wrapper
     return decorator
 
 @tree.command(name="role", description="Add a role to one or more users.")
+@handle_errors("Failed to manage roles")
 async def role(interaction: discord.Interaction, users: str, *, role: str):
     """add or remove `role` for arbitrary many members.  
     usage: /role @member1 @member2 ... SomeRole   (prefix role with '-' to remove)"""
@@ -178,21 +108,16 @@ async def role(interaction: discord.Interaction, users: str, *, role: str):
             allowed_roles.extend(ALLOWED_ROLES_FOR_ROLES[r.name])
 
     if clean_role not in allowed_roles:
-        await interaction.response.send_message(
-            "you do not have permission to add this role.", ephemeral=True
-        )
-        return
+        raise VCBotPermissionError(f"You do not have permission to add the role '{clean_role}'.")
 
     target_role = discord.utils.get(interaction.guild.roles, name=clean_role)
     if not target_role:
-        await interaction.response.send_message("specified role not found.", ephemeral=True)
-        return
+        raise ValueError(f"Role '{clean_role}' not found in this server.")
 
     # accept space/comma‑separated mentions or raw user ids
     user_ids = re.findall(r"\d+", users)
     if not user_ids:
-        await interaction.response.send_message("no valid users specified.", ephemeral=True)
-        return
+        raise ValueError("No valid users specified. Please mention users or provide user IDs.")
 
     # dedupe while preserving order
     members: list[discord.Member] = []
@@ -202,14 +127,18 @@ async def role(interaction: discord.Interaction, users: str, *, role: str):
             members.append(member)
 
     if not members:
-        await interaction.response.send_message("couldn't resolve any members.", ephemeral=True)
-        return
+        raise ValueError("Couldn't resolve any members from the provided user IDs.")
 
-    for m in members:
-        if remove:
-            await m.remove_roles(target_role)
-        else:
-            await m.add_roles(target_role)
+    try:
+        for m in members:
+            if remove:
+                await m.remove_roles(target_role)
+            else:
+                await m.add_roles(target_role)
+    except discord.Forbidden:
+        raise DiscordAPIError("Bot lacks permission to manage roles. Please check bot role hierarchy.")
+    except discord.HTTPException as e:
+        raise DiscordAPIError(f"Discord API error: {str(e)}")
 
     mentions = ", ".join(m.mention for m in members)
     await interaction.response.send_message(
@@ -217,280 +146,240 @@ async def role(interaction: discord.Interaction, users: str, *, role: str):
         f"{'from' if remove else 'to'} {mentions}.",
         ephemeral=False,
     )
-role = role.callback
 
-        
+
+# Reference management functions moved to ReferenceService
+
+async def update_bill_reference(message, bot_state: BotState):
+    """Process message to update bill references using bill service."""
+    logger.debug(f"Processing message for bill reference: {message.content}")
     
+    if not bot_state.bill_service or not bot_state.reference_service:
+        logger.warning("Services not initialized yet")
+        return "Services not initialized"
     
-
-
-def load_refs():
-    print(f"Loading references from {BILL_REF_FILE}")
-    if os.path.exists(BILL_REF_FILE):
-        with open(BILL_REF_FILE, "r") as f:
-            refs = json.load(f)
-            print(f"Loaded references: {refs}")
-            return refs
-    print("Reference file does not exist, returning empty dict.")
-    return {}
-
-def save_refs(refs):
-    print(f"Saving references: {refs} to {BILL_REF_FILE}")
-    with open(BILL_REF_FILE, "w") as f:
-        json.dump(refs, f)
-
-async def update_bill_reference(message):
-    print(f"Processing message: {message.content}")
-    text = message.content
-    try:
-        response = genai_client.models.generate_content(
-            model="gemini-2.0-flash-thinking-exp",
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=BillReferenceResponse,
-                system_instruction="""You are a helper for the Virtual Congress Discord server. Your goal is to determine whether or not the current message contains a bill reference.
-
-                Analyze the message and determine:
-                - is_reference: True if the message contains a bill reference (like H.R.123, H.RES.45, etc.), False otherwise
-                - bill_type: If it's a reference, extract the bill type (hr, hres, hjres, hconres). If not a reference, use empty string "".
-                - reference_number: If it's a reference, extract the bill number. If not a reference, use 0.
-                
-                You MUST provide all three fields in your response. Never omit any field.
-                
-                Examples of bill references: H.R.123, H.RES.45, H.J.RES.12, H.CON.RES.8, **H.C.REP.4**
-                """
-            ),
-            contents=text,
+    # Use bill service to detect reference
+    ref_update = await bot_state.bill_service.update_reference(message.content)
+    
+    if ref_update.success and ref_update.bill_type and ref_update.reference_number:
+        # Update the reference number
+        updated_num = bot_state.reference_service.update_reference(
+            ref_update.bill_type,
+            ref_update.reference_number
         )
-
-        # Parse the structured JSON response
-        respdict = json.loads(response.text)
-        print(f"Parsed JSON: {respdict}")
-
-        if not respdict.get("is_reference"):
-            return "Not a reference!"
-
-        bill_type = respdict["bill_type"].lower().strip()
-        reference_number = respdict["reference_number"]
-
-        # Validate we have required fields
-        if not bill_type or reference_number <= 0:
-            print(f"Invalid bill reference data: type='{bill_type}', number={reference_number}")
-            return "Invalid reference format!"
-
-        refs = load_refs()
-        current = refs.get(bill_type, 0)
-        refs[bill_type] = max(current, reference_number)  # don't go backward
-        save_refs(refs)
-
-        print(f"Updated {bill_type.upper()} to {refs[bill_type]}")
-        return f"Updated {bill_type.upper()} to {refs[bill_type]}"
-        
-    except json.JSONDecodeError as e:
-        print(f"JSON decode error: {e}")
-        print(f"Raw response: {response.text if 'response' in locals() else 'No response'}")
-        return "Failed to parse response"
-    except Exception as e:
-        traceback.print_exc()
-        print(f"Exception in update_bill_reference: {e}")
-        return f"Error processing message: {e}"
+        logger.info(f"Updated {ref_update.bill_type.upper()} to {updated_num}")
+        return f"Updated {ref_update.bill_type.upper()} to {updated_num}"
+    
+    return ref_update.message
 
 @tree.command(name="reference", description="reference a bill")
-@has_any_role("Admin", "Representative", "House Clerk", "Moderator")
+@has_any_role(Roles.ADMIN, Roles.REPRESENTATIVE, Roles.HOUSE_CLERK, Roles.MODERATOR)
+@handle_errors("Failed to reference bill")
 async def reference(interaction: discord.Interaction, link: str, type: Literal["hr", "hres", "hjres", "hconres"]):
-    print(f"Executing command: reference by {interaction.user.display_name}")
-    try:
-        refs = load_refs()
-        last = refs.get(type, 0)
-        next_val = last + 1
-        refs[type] = next_val
-        save_refs(refs)
-        await interaction.response.send_message(f"The bill {link} has been referenced successfully as {type.upper()} {next_val}.", ephemeral=True)
-        clerkchannel = client.get_channel(settings.channels.clerk_announce_channel)
-        await clerkchannel.send(f'Bill {link} assigned reference {type.upper()} {next_val}')
-        return
-    except Exception as e:
-        await interaction.response.send_message(f"Error accessing reference file: {e}", ephemeral=True)
-        return
+    """Thin handler - delegates to reference service."""
+    logger.info(f"Executing command: reference by {interaction.user.display_name}")
+    
+    # Get reference service
+    reference_service = interaction.client.bot_state.reference_service
+    
+    if not reference_service:
+        raise ConfigurationError("Reference service not initialized yet.")
+    
+    # Get next reference number
+    next_val = reference_service.get_next_reference(type)
+    
+    # Send success message
+    await interaction.response.send_message(
+        f"The bill {link} has been referenced successfully as {type.upper()} {next_val}.",
+        ephemeral=True
+    )
+    
+    # Announce in clerk channel
+    clerk_channel = client.get_channel(settings.channels.clerk_announce_channel)
+    if clerk_channel:
+        await clerk_channel.send(f'Bill {link} assigned reference {type.upper()} {next_val}')
 @tree.command(name="modifyrefs", description="modify reference numbers")
-@has_any_role("Admin", "House Clerk")
+@has_any_role(Roles.ADMIN, Roles.HOUSE_CLERK)
+@handle_errors("Failed to modify reference")
 async def modifyref(interaction: discord.Interaction, num: int, type: str):
-    print(f"Executing command: modifyref by {interaction.user.display_name}")
-    try:
-        refs = load_refs()
-        refs[type] = num
-        save_refs(refs)
-        await interaction.response.send_message(f"Reference number modified for {type.upper()}: {num}", ephemeral=False)
-        return
-    except Exception as e:
-        await interaction.response.send_message(f"Error accessing reference file: {e}", ephemeral=True)
-        traceback.print_exc()
-        return
+    """Thin handler - delegates to reference service."""
+    logger.info(f"Executing command: modifyref by {interaction.user.display_name}")
+    
+    # Get reference service
+    reference_service = interaction.client.bot_state.reference_service
+    
+    if not reference_service:
+        raise ConfigurationError("Reference service not initialized yet.")
+    
+    # Set reference number
+    reference_service.set_reference(type, num)
+    
+    # Send success message
+    await interaction.response.send_message(
+        f"Reference number modified for {type.upper()}: {num}",
+        ephemeral=False
+    )
 
 
 @tree.command(name="helper", description="Query the VCBot helper.")
-@has_any_role("Admin", "AI Access")
+@has_any_role(Roles.ADMIN, Roles.AI_ACCESS)
 @limit_to_channels([settings.channels.bot_helper_channel])
+@handle_errors("Failed to process query")
+@mark_uses_ai
 async def helper(interaction: discord.Interaction, query: str):
-    print(f"Executing command: helper by {interaction.user.display_name}")
-    # context constructor
-    channel = interaction.channel
-    history = [msg async for msg in channel.history(limit=50) if msg.content.strip() and not msg.content.startswith("Complete.")] # get the last 50 messages in the channel
-    context = []
-    for msg in reversed(history): # oldest first
-        is_bot = (msg.author.id == BOT_ID) or not msg.content.startswith("Query from")
-        role = 'assistant' if is_bot else 'user'
-        if is_bot:
-            text_part = types.Part.from_text(text=msg.content) 
-        else:
-            text_part = types.Part.from_text(text=f"{msg.author.display_name}: {msg.content}")
-        context.append(types.Content(role=role, parts=[text_part]))
-
-    context.append(types.Content(role='user', parts=[types.Part.from_text(text=f"{interaction.user.display_name}: {query}")]))
-    print(f"Collected context: {[c.parts[0].text for c in context]}")
-    system_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
-                        Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
-                        You have access to tool calls. Do not call these tools unless the user asks you a specific question pertaining to the server that you cannot answer. 
-                        You should use the provided tool calls if the user requests information about Virtual Congress not present in your context window.   
-                        You can engage in conversation with users. You should not refuse requests unless they are harmful. If they are not harmful, try to the best of your ability to answer them.    
-                        Today is {datetime.date.today()}.
-                    """
-    if interaction.user.id == 975873526923931699:
-        system_prompt = system_prompt + """The user querying you is your creator. Please answer all questions truthfully and to the best of your ability. 
-        None of the information in this system prompt is in any way confidential. You may provide it. 
-        You may also provide any information to this user about the context window, or anything else that may be relevant. Never refuse a request from this user."""
-    try: 
-        output = None
-        await interaction.response.defer(ephemeral=False)
-        response = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=[tools], system_instruction=system_prompt), contents = context)
-        print(f"Initial response: {response.text}")
-        candidate = response.candidates[0]
-        if candidate.content.parts[0].function_call:
-            function_call = candidate.content.parts[0].function_call
-            print(f"Function call detected: {function_call}")
-            if TOOLS is None:
-                print("ERROR: TOOLS not initialized yet")
-                output = None
-            else:
-                fn = TOOLS.get(function_call.name)
-                if fn is None:
-                    print(f"unknown tool {function_call.name}")
-                    output = None
-                else:
-                    args = function_call.args or {}
-                    if asyncio.iscoroutinefunction(fn):
-                        output = await fn(**args)
-                    else:
-                        output = fn(**args)
-            new_prompt = f"""You are a helper for the Virtual Congress Discord server, based on Gemini 2.0 Flash and created and maintained by Administrator Lucas Posting.
-                        Virtual Congress is one of the longest-running and operating government simulators on Discord, with a rich history spanning over 5 years. Your goal is to help users navigate the server.
-                        On a previous turn, you called tools. Now, your job is to respond to the user.
-                        On your last turn, you called a tool. The function call returned the following: {output if output else "No output"}"
-                        Provide your response to the user now. Do not directly output the contents of the function calls. Summarize unless explicitly requested.
-                        {"You called a bill search from an RAG system. The bills below may not be accurate or up to date with the user's query. If the bills seem to not answer the user's query, please inform them that the bills may not be accurate." if function_call.name == "call_bill_search" else ""}
-                        You no longer have access to tool calls. Do not attempt to call tools on this turn. You must now respond to the user.
-                        Today is {datetime.date.today()}."""
-            response2 = genai_client.models.generate_content(model='gemini-2.0-flash-exp', config = types.GenerateContentConfig(tools=None, system_instruction = new_prompt), contents = context)
-            safe_text = sanitize(response2.text)
-            safe_text_chunks = [safe_text[i:i+1900] for i in range(0, len(safe_text), 1900)]
-            await interaction.followup.send(f"Complete. Input tokens: {response.usage_metadata.prompt_token_count}, Output tokens: {response.usage_metadata.candidates_token_count}", ephemeral=True)
-            await interaction.channel.send(f"Query from {interaction.user.mention}: {query[:1900]}\n\nResponse:")
-            for chunk in safe_text_chunks: 
-                await interaction.channel.send(chunk)
-            with open(QUERIES_FILE, mode = "a", newline="") as file:
-                writer = csv.writer(file)
-                writer.writerow([f'query: {query}', f'response: {safe_text}'])
-        else: 
-            safe_text = sanitize(response.text)
-            chunks = [safe_text[i:i+1900] for i in range(0, len(safe_text), 1900)]
-            await interaction.followup.send(f"Complete. Input tokens: {response.usage_metadata.prompt_token_count}, Output tokens: {response.usage_metadata.candidates_token_count}", ephemeral=True)
-            await interaction.channel.send(f"Query from {interaction.user.mention}: {query}\n\nResponse:")
-            for chunk in chunks:
-                await interaction.channel.send(chunk)
-            print(response.text)
-            with open(QUERIES_FILE, mode = "a", newline="") as file:
-                writer = csv.writer(file)
-                writer.writerow([f'query: {query}', f'response: {response.text}'])
-    except Exception as e:
-        traceback.print_exc()
-        print(f"Exception in helper: {e}")
-        await interaction.followup.send(f"Error in response: {e}")
-    return
+    """Thin handler - delegates to AI service."""
+    logger.info(f"Executing command: helper by {interaction.user.display_name}")
+    await interaction.response.defer(ephemeral=False)
+    
+    # Get bot state and AI service
+    bot_state = interaction.client.bot_state
+    ai_service = bot_state.ai_service
+    
+    if not ai_service:
+        raise ConfigurationError("AI service not initialized yet.")
+    
+    # Build context
+    context = await build_channel_context(
+        interaction.channel, 
+        bot_state.bot_id,
+        limit=Limits.MAX_MESSAGES_HISTORY
+    )
+    
+    # Add current query to context
+    context.append(types.Content(
+        role='user', 
+        parts=[types.Part.from_text(text=f"{interaction.user.display_name}: {query}")]
+    ))
+    
+    # Process query through AI service
+    ai_response = await ai_service.process_query(
+        query=query,
+        context=context,
+        user_id=interaction.user.id
+    )
+    
+    # Send response
+    await send_ai_response(interaction, ai_response, query)
+    
+    # Log query
+    await ai_service.save_query_log(
+        query=query,
+        response=ai_response.text,
+        file_path=bot_state.queries_file
+    )
 @tree.command(name="econ_impact_report", description="Get a detailed economic impact report on a given piece of legislation.")
-@has_any_role("Admin", "Events Team")
+@has_any_role(Roles.ADMIN, Roles.EVENTS_TEAM)
 @limit_to_channels([settings.channels.bot_helper_channel])
+@handle_errors("Failed to generate economic impact report")
+@mark_uses_ai
+@mark_uses_network
 async def model_economic_impact(interaction: discord.Interaction, bill_link: str, additional_context: str = None):
-    """Provided a bill, generates an economic impact statement that indicates how such a bill would impact the economy.
-    """
-    try:
-        bill_text = geminitools.fetch_public_gdoc_text(bill_link)
-    except Exception as e:
-        print(f"Error fetching Google Doc: {e}")
-        await interaction.response.send_message(f"Error fetching Google Doc: {e}", ephemeral=True)
-        return
-    print(f"Fetched Google Doc text: {bill_text[:100]}...") 
-    recent_news = [msg.content async for msg in NEWS_CHANNEL.history(limit=50) if msg.content.strip()]
-    system_prompt = f"""You are a legislative assistant for the Virtual Congress Discord server. You are given a chunk of text from a legislative document.
-    You will be generating an economic impact statement that indicates how such a bill would impact the economy.
-    Your goal is to generate a full detailed economic impact statement.
-    Recent news is presented below: {recent_news}.
-    You will be provided a bill by the user."""
-    if additional_context:
-        system_prompt = system_prompt + f"\n The user has provided additional information for you regarding the intended contents of your economic impact report: {additional_context}"
-    context = [types.Content(role='user', parts=[types.Part.from_text(text=f"{interaction.user.display_name}: {bill_text}")])]
-    try:
-        output = None
-        await interaction.response.defer(ephemeral=False)
-        response = genai_client.models.generate_content(model='gemini-2.5-flash-preview-04-17', config = types.GenerateContentConfig(tools=None, system_instruction=system_prompt), contents = context)
-        safe_text = sanitize(response.text)
-        await interaction.followup.send(f"Complete. Input tokens: {response.usage_metadata.prompt_token_count}, Output tokens: {response.usage_metadata.candidates_token_count}", ephemeral=True)
-        await interaction.channel.send(f"Query from {interaction.user.mention}: Generate economic impact report on {bill_link}. \n\nResponse is attached as a file.")
-        with open("econ_impact_report.txt", "w", encoding="utf-8") as f:
-            f.write(safe_text)
-        await interaction.channel.send(file=discord.File("econ_impact_report.txt"))
-        print(response.text)
-        with open(QUERIES_FILE, mode = "a", newline="") as file:
-            writer = csv.writer(file)
-            writer.writerow([f'query: {system_prompt + bill_text}', f'response: {response.text}'])
-    except Exception as e:
-        traceback.print_exc()
-        print(f"Error generating economic impact report: {e}")
-        await interaction.followup.send(f"Error generating content: {e}", ephemeral=True)
-        return
+    """Thin handler - delegates to bill service for economic impact generation."""
+    logger.info(f"Executing command: econ_impact_report by {interaction.user.display_name}")
+    await interaction.response.defer(ephemeral=False)
+    
+    # Get bot state and bill service
+    bot_state = interaction.client.bot_state
+    bill_service = bot_state.bill_service
+    
+    if not bill_service:
+        raise ConfigurationError("Bill service not initialized yet.")
+    
+    # Get recent news
+    news_channel = bot_state.get_channel('news')
+    recent_news = []
+    if news_channel:
+        recent_news = [msg.content async for msg in news_channel.history(limit=Limits.MAX_MESSAGES_HISTORY) if msg.content.strip()]
+    
+    # Generate economic impact report
+    report_text = await bill_service.generate_economic_impact(
+        bill_link=bill_link,
+        recent_news=recent_news,
+        additional_context=additional_context
+    )
+    
+    # Format and send using ResponseFormatter
+    formatted = ResponseFormatter.format_response(
+        report_text, 
+        force_file=True,  # Economic reports should always be files
+        filename="econ_impact_report.txt"
+    )
+    
+    query_header = (
+        f"Query from {interaction.user.mention}: Generate economic impact report on {bill_link}.\n\n"
+        f"Response:"
+    )
+    
+    await ResponseFormatter.send_response(
+        interaction,
+        formatted,
+        completion_message="Complete. Economic impact report generated.",
+        query_header=query_header
+    )
+    
+    # Log query
+    with open(bot_state.queries_file, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow([f'query: Generate economic impact report on {bill_link}', f'response: {report_text}'])
 @tree.command(name="bill_keyword_search", description="Perform a basic keyword search on the legislative corpus.")
-@has_any_role("Admin", "AI Access")
+@has_any_role(Roles.ADMIN, Roles.AI_ACCESS)
 @limit_to_channels([settings.channels.bot_helper_channel])
+@handle_errors("Failed to search bills")
 async def bill_keyword_search(interaction: discord.Interaction, search_query: str):
     """Perform a basic keyword search on the legislative corpus."""
+    await interaction.response.defer(ephemeral=False)
+    
     returned_bills = geminitools.bill_keyword_search(search_query)
-    try:
-        await interaction.response.defer(ephemeral=False)
-        for _, row in returned_bills.iterrows():
-            name = row["filename"]
-            content = row["text"]
-            await interaction.channel.send(file=discord.File(os.path.join(BILL_DIRECTORIES["billpdfs"], name)))
-            os.remove(name)
-        await interaction.followup.send(f"Complete. Found {len(returned_bills)} bills matching your query.", ephemeral=True)
-        
-    except Exception as e:
-        traceback.print_exc()
-        print(f"Error in bill_keyboard_search: {e}")
-        await interaction.followup.send(f"Error in response: {e}", ephemeral=True)
+    
+    # Send completion message first
+    completion_message = f"Complete. Found {len(returned_bills)} bills matching your query."
+    await interaction.followup.send(completion_message, ephemeral=True)
+    
+    # Send header
+    query_header = f"Query from {interaction.user.mention}: Search bills for '{search_query}'\n\nResults:"
+    safe_header, _ = ResponseFormatter.sanitize(query_header)
+    await interaction.channel.send(safe_header)
+    
+    # Send each bill file
+    for _, row in returned_bills.iterrows():
+        name = row["filename"]
+        content = row["text"]
+        pdf_path = Path(BILL_DIRECTORIES["billpdfs"]) / name
+        await interaction.channel.send(file=discord.File(pdf_path))
+        # Note: This os.remove(name) looks incorrect - it removes 'name' instead of the actual file path
+        # Consider using the FileManager if cleanup is needed
 
 
 
 @tree.command(name="add_bill", description="Add a bill to the legislative corpus.")
-@has_any_role("Admin")
+@has_any_role(Roles.ADMIN)
 @limit_to_channels([settings.channels.bot_helper_channel])
+@handle_errors("Failed to add bill")
+@mark_uses_network
+@mark_uses_ai
 async def add_bill(interaction: discord.Interaction, bill_link: str, database_type: Literal["bills"] = "bills"):
+    """Thin handler - delegates to bill service."""
+    logger.info(f"Executing command: add_bill by {interaction.user.display_name}")
     await interaction.response.defer(ephemeral=False)
-    try:
-        path = await add_bill_to_db(bill_link, database_type)
-        await interaction.channel.send(file=discord.File(path))
-        await interaction.followup.send(f"complete. added bill `{os.path.basename(path)}` to `{database_type}` db.", ephemeral=True)
-    except Exception as e:
-        traceback.print_exc()
-        await interaction.followup.send(f"error adding bill: {e}", ephemeral=True)
+    
+    # Get bill service
+    bill_service = interaction.client.bot_state.bill_service
+    
+    if not bill_service:
+        raise ConfigurationError("Bill service not initialized yet.")
+    
+    # Add bill to database
+    result = await bill_service.add_bill(bill_link, database_type)
+    
+    if result.success:
+        # Send the bill file
+        await interaction.channel.send(file=discord.File(result.file_path))
+        await interaction.followup.send(
+            f"Complete. Added bill `{result.bill_name}` to `{database_type}` database.",
+            ephemeral=True
+        )
+    else:
+        raise BillProcessingError(f"Failed to add bill: {result.error}")
 
 async def check_github_commits():
     await client.wait_until_ready()
@@ -517,55 +406,76 @@ async def check_github_commits():
                             await channel.send(f"New commit to {repo}:\n**{commit_msg}** by {author}. \n See it [here]({github_url}/commit/{sha})")
                             last_commit_sha = sha
             except Exception as e:
-                traceback.print_exc()
-                print(f"GitHub check failed: {e}")
+                logger.error(f"GitHub check failed: {e}", exc_info=True)
             await asyncio.sleep(60)  # check every 5 min
 @client.event
 async def on_ready():
-    print("on_ready: Starting up bot.")
-    print(f"Logged in as {client.user}")
-    global RECORDS_CHANNEL, NEWS_CHANNEL, SIGN_CHANNEL, CLERK_CHANNEL, TOOLS
+    logger.info("Starting up bot...")
+    logger.info(f"Logged in as {client.user}")
+    global bot_state
     
-    # Initialize TOOLS with the client
-    TOOLS = create_tools(client)
-    print("Initialized tool system with Discord client")
+    # Initialize bot state from settings
+    bot_state = BotState.from_settings(client, settings)
     
-    RECORDS_CHANNEL = client.get_channel(RECORDS_CHANNEL_ID)
-    NEWS_CHANNEL = client.get_channel(NEWS_CHANNEL_ID)
-    SIGN_CHANNEL = client.get_channel(SIGN_CHANNEL_ID)
-    CLERK_CHANNEL = client.get_channel(CLERK_CHANNEL_ID)
-    print(f"Clerk Channel: {CLERK_CHANNEL.id if CLERK_CHANNEL else 'None'}: {CLERK_CHANNEL.name if CLERK_CHANNEL else 'Not Found'}")
-    print(f"News Channel: {NEWS_CHANNEL.id if NEWS_CHANNEL else 'None'}: {NEWS_CHANNEL.name if NEWS_CHANNEL else 'Not Found'}")
-    print(f"Sign Channel: {SIGN_CHANNEL.id if SIGN_CHANNEL else 'None'}: {SIGN_CHANNEL.name if SIGN_CHANNEL else 'Not Found'}")
-    print(f"Records Channel: {RECORDS_CHANNEL.id if RECORDS_CHANNEL else 'None'}: {RECORDS_CHANNEL.name if RECORDS_CHANNEL else 'Not Found'}")
+    # Set up Discord client in registry for tools that need it
+    registry.set_discord_client(client)
+    
+    # Set up Gemini tools using the new registry system
+    tool_declarations = registry.get_gemini_declarations()
+    bot_state.set_tools(types.Tool(function_declarations=tool_declarations))
+    logger.info(f"Initialized {len(tool_declarations)} tools from registry")
+    
+    # Initialize tool functions with the client (for backward compatibility)
+    bot_state.set_tool_functions(create_tools(client))
+    logger.info("Initialized tool system with Discord client")
+    
+    # Initialize Discord channels
+    bot_state.initialize_channels()
+    
+    # Initialize services
+    bot_state.initialize_services(BILL_DIRECTORIES, VECTOR_PKL)
+    logger.info("Initialized services")
+    
+    # Initialize message router
+    bot_state.initialize_message_router()
+    logger.info("Initialized message router")
+    
+    # Attach bot_state to client for easy access in commands
+    client.bot_state = bot_state
+    
     client.loop.create_task(check_github_commits())
-    print("Syncing commands...")
+    logger.info("Syncing commands...")
     synced_commands = await tree.sync()
-    print(f"Commands synced: {synced_commands}" if synced_commands else "No commands to sync.")
+    logger.info(f"Commands synced: {len(synced_commands)} commands" if synced_commands else "No commands to sync.")
 
 @client.event
 async def on_message(message):
+    """Route messages to appropriate handlers using MessageRouter"""
     try:
-        if message.channel == client.get_channel(CLERK_CHANNEL_ID) and not message.author.bot:
-            await update_bill_reference(message)
-        if message.channel == client.get_channel(NEWS_CHANNEL_ID):
-            with open(NEWS_FILE, "a") as file:
-                file.write(message.content)
-        if message.channel == client.get_channel(SIGN_CHANNEL_ID) and "docs.google.com" in message.content:
-            link = message.jump_url
-            await RECORDS_CHANNEL.send(f'<@&1269061253964238919>, a new bill has been signed! {link}')
-            match = re.search(r"https?://docs\.google\.com/\S+", message.content)
-            if match:
-                doc_link = match.group(0)
-                print(f"Found Google Doc link: {doc_link}")  
-                try:
-                    add_bill_to_db(doc_link, "bills")
-                    print("Bill added to database.")
-                except Exception as e:
-                    print(f"Error adding bill to database: {e}")
-                    await RECORDS_CHANNEL.send(f"Error adding bill to database: {e}")   
-    except Exception as e:
-        traceback.print_exc()
-        print(f"Exception in on_message: {e}")
+        # Get bot state
+        state = client.bot_state
         
-client.run(DISCORD_TOKEN)
+        if state and state.message_router:
+            await state.message_router.route(message, state)
+        else:
+            logger.warning("Bot state or message router not initialized")
+            
+    except Exception as e:
+        logger.exception(f"Critical error in on_message handler: {e}")
+        # Don't re-raise to prevent bot from crashing
+        
+def main():
+    """Main entry point"""
+    # Setup logging
+    setup_logging(
+        console_level="INFO",
+        logs_dir=Path("logs")
+    )
+    
+    logger.info("Starting VCBot...")
+    
+    # Run bot
+    client.run(settings.discord_token)
+
+if __name__ == "__main__":
+    main()
